@@ -1,0 +1,348 @@
+-- NOTE:
+-- 1. **JavaScript/TypeScript**: Supports default parameters and object destructuring to simulate keyword arguments, but does not natively support mixing keyword and non-keyword arguments.
+-- 2. **Ruby**: Supports keyword arguments and can mix them with positional arguments.
+-- 3. **Swift**: Supports mixing keyword and positional arguments.
+-- 4. **Kotlin**: Supports named arguments and can mix them with positional arguments.
+-- 5. **Julia**: Supports keyword arguments and can mix them with positional arguments.
+-- 6. **R**: Supports mixing keyword and positional arguments.
+-- 7. **C#**: Supports named arguments and can mix them with positional arguments.
+-- 8. **PHP**: Supports named arguments (from PHP 8.0) and can mix them with positional arguments.
+
+-- NOTE: In lua there are no kwargs, but the change would happen by
+-- refactoring the function to take as input a table and then every reference
+-- that calls it would need to be updated to pass a table with the arguments.
+-- Much more complicated than just adding kwargs to the function signature.
+
+-- Other functionalities: could be used to rename variables that go into a function call as kwargs,
+-- into the name of the variable in the function definition. This could make the variable names
+-- more consistent in certain places. Or move expressions defined in kwargs to a variable definition
+-- above the function call. Example
+--  ```python
+--  foo(a=1, b=2 + 3 * 4)
+--  ```
+--  would become
+--  ```python
+--  b = 2 + 3 * 4
+--  foo(a=1, b=b)
+--  ```
+
+local M = {}
+
+---Prints the message if debug is true
+---@param msg string
+---@param debug boolean
+local function maybe_print(msg, debug)
+    if debug then
+        print(msg)
+    end
+end
+
+-- WARNING: The query is not the same between languages it seems!
+-- We'll need to create a query for each language we want to support...
+--
+-- Examples:
+-- NOTE: lua
+-- (function_call ; [565, 0] - [565, 15]
+--   name: (identifier) ; [565, 0] - [565, 6]
+--   arguments: (arguments ; [565, 6] - [565, 15]
+--     (number) ; [565, 7] - [565, 8]
+--     (number) ; [565, 10] - [565, 11]
+--     (number))) ; [565, 13] - [565, 14]
+-- Foobar(1, 2, 3)
+
+-- NOTE: python
+-- (call ; [51, 0] - [51, 21]
+--   function: (identifier) ; [51, 0] - [51, 12]
+--   arguments: (argument_list ; [51, 12] - [51, 21]
+--     (integer) ; [51, 13] - [51, 14]
+--     (integer) ; [51, 16] - [51, 17]
+--     (integer)))) ; [51, 19] - [51, 20]
+-- fn_with_args(1, 2, 3)
+
+-- NOTE: Python has basic kwargs with a few rules.
+--   1. You can't have non-keyword arguments after keyword arguments.
+--   2. Arguments after a "*" are keyword-only arguments.
+--   3. The symbol / can be used to separate positional-only arguments from positional-or-keyword arguments.
+
+-- NOTE: According to ChatGPT: https://chatgpt.com/share/670be543-bf70-800a-a3e4-1e4b7611d074
+-- (
+--   (call
+--     function: [
+--       (identifier) @function
+--       (attribute
+--         object: (_)* @object
+--         attribute: (identifier) @method
+--       )
+--     ]
+--     arguments: (argument_list) @arguments
+--   )
+-- )
+
+
+local query_strings = {
+    python = [[
+        (
+          (call
+            function: [
+              (identifier)
+              (attribute
+                object: (_)*
+                attribute: (identifier)
+              )
+                ]
+            arguments: (argument_list)
+          ) @call
+        )
+    ]],
+    lua = [[
+        (function_call
+          name: (identifier) @function
+          arguments: (arguments) @arguments
+        )
+    ]]
+}
+
+
+---Returns the treesitter query for the current language.
+---@return vim.treesitter.Query
+local function get_query()
+    local parsers = require('nvim-treesitter.parsers')
+    local parser = parsers.get_parser()
+    local lang = parser:lang()
+
+    local query_string = query_strings[lang]
+    if query_string == nil then
+        error("Query string not found for language " .. lang)
+    end
+
+    local query = vim.treesitter.query.parse(lang, query_string)
+
+    return query
+end
+
+---BFS on the tree under `node` to find the first node of type `target_type`
+---@param node TSNode
+---@param target_type string
+---@return TSNode
+local function find_first_node_of_type_bfs(node, target_type)
+    local queue = { node }
+
+    while #queue > 0 do
+        local current_node = table.remove(queue, 1) -- Dequeue the first element
+
+        if current_node:type() == target_type then
+            return current_node
+        end
+
+        for child in current_node:iter_children() do
+            table.insert(queue, child) -- Enqueue child nodes
+        end
+    end
+
+    error("Node not found")
+end
+
+
+---@param mode string
+---@return table<integer, TSNode>
+local function match_argument_nodes(mode)
+    local parsers = require('nvim-treesitter.parsers')
+    local parser = parsers.get_parser()
+    local tree = parser:parse()[1]
+    local query = get_query()
+
+    local start_line, end_line
+
+    if mode == 'v' then
+        -- Visual mode
+        start_line = vim.fn.line("'<") - 1
+        end_line = vim.fn.line("'>")
+    elseif mode == 'n' then
+        -- Normal mode
+        start_line = vim.fn.line('.') - 1
+        end_line = start_line + 1
+    else
+        error("Invalid mode")
+    end
+
+    local results = {}
+
+    for _, node, _, _ in query:iter_captures(tree:root(), 0, start_line, end_line) do
+        local arguments_node = find_first_node_of_type_bfs(node, "argument_list")
+        results[#results + 1] = arguments_node
+    end
+
+    return results
+end
+
+
+---@param arguments_node TSNode
+---@return table
+local function get_params_from_arguments_node(arguments_node)
+    -- Extract the position from arguments_node
+    local start_row, start_col = arguments_node:start()
+
+    -- Create params using the position
+    local params = {
+        textDocument = vim.lsp.util.make_text_document_params(),
+        position = { line = start_row, character = start_col }
+    }
+    return params
+end
+
+
+--- TODO: comment, rename this function? it returns the arguments list...
+--- @param arguments_node TSNode
+local function get_function_info(arguments_node)
+    local params = get_params_from_arguments_node(arguments_node)
+
+    -- WARNING: Not sure I understand this...
+    params.position.character = params.position.character + 1
+    -- params.position.line = params.position.line + 1
+
+    local result = vim.lsp.buf_request_sync(0, "textDocument/signatureHelp", params, 10000)
+
+    if result == nil then
+        error("No result returned!")
+    end
+
+    -- TODO: May want to reformat the results...
+    local key = next(result)
+
+    local arguments = {}
+
+    if result and result[key] and result[key].result and result[key].result.signatures then
+        local signature = result[key].result.signatures[1]
+        local label = signature.label
+        local parameters = signature.parameters
+
+        for _, param in ipairs(parameters) do
+            local start_idx = param.label[1] + 1
+            local end_idx = param.label[2]
+            local arg_name = label:sub(start_idx, end_idx)
+            -- split by `:` and get the first part
+            arg_name = arg_name:match("([^:]+)")
+            -- print("arg name=" .. arg_name)
+            arguments[#arguments + 1] = arg_name
+        end
+    else
+        error("No signature help available!")
+    end
+
+    return arguments
+end
+
+--- Returns the first LSP client that supports signature help.
+---@param debug boolean: Whether to print debug information
+---@return vim.lsp.Client?
+local function lsp_supports_signature_help(debug)
+    -- Ensure the LSP client is attached
+    local clients = vim.lsp.get_clients()
+
+    local clients_with_signature_help = {}
+    for _, client in ipairs(clients) do
+        if client.server_capabilities.signatureHelpProvider then
+            clients_with_signature_help[#clients_with_signature_help + 1] = client
+        end
+    end
+
+    maybe_print("Clients" .. #clients .. "Clients with signatureHelp" .. #clients_with_signature_help, debug)
+
+    if #clients_with_signature_help == 0 then
+        maybe_print("No LSP client attached", debug)
+        return nil
+    end
+
+    maybe_print("LSP server supports signatureHelp", debug)
+
+    return clients_with_signature_help[1]
+end
+
+--- @param arguments_node TSNode
+--- @return table<number, string>
+local function get_argument_values(arguments_node)
+    local argument_values = {}
+    for i = 0, arguments_node:named_child_count() - 1 do
+        local arg = arguments_node:named_child(i)
+        if arg == nil then
+            error("Argument is nil")
+        end
+        local arg_value = vim.treesitter.get_node_text(arg, 0)
+        argument_values[#argument_values + 1] = arg_value
+    end
+    return argument_values
+end
+
+--- Returns true if the string contains an equal sign outside of parentheses.
+---@param s string
+---@return boolean
+local function contains_equal_outside_of_parentheses(s)
+    for i = 1, #s do
+        local char = s:sub(i, i)
+        if char == "=" then
+            return true
+        elseif char == "(" then
+            return false
+        end
+    end
+    return false
+end
+
+--- Returns a table of arguments using their keyword version.
+---@param argument_values table<number, string>
+---@param function_info table<number, string>
+---@return table<number, string>
+local function get_args(argument_values, function_info)
+    -- NOTE: in python you can't have non-keyword arguments after keyword arguments
+    -- Therefore, we can just append the rest of the arguments as they are as soon
+    -- as we encounter a keyword argument.
+
+    local args = {}
+
+    for i = 1, #argument_values do
+        local arg_name = function_info[i]
+        local arg_value = argument_values[i]
+
+        if contains_equal_outside_of_parentheses(arg_value) then
+            -- This is a keyword argument, we can just append the rest of the arguments
+            break
+        else
+            args[#args + 1] = arg_name .. "=" .. arg_value
+        end
+    end
+
+    for i = #args + 1, #argument_values do
+        local arg_value = argument_values[i]
+        args[#args + 1] = arg_value
+    end
+
+    return args
+end
+
+---Expands the keyword arguments in the current line.
+---@param mode string: The mode in which the function is called
+M.expand_keywords = function(mode)
+    local debug = false
+
+    if not lsp_supports_signature_help(debug) then
+        return
+    end
+
+    local argument_nodes = match_argument_nodes(mode)
+
+    for i = #argument_nodes, 1, -1 do
+        -- arguments_node: TSNode
+        local arguments_node = argument_nodes[i]
+
+        local function_info = get_function_info(arguments_node)
+        local argument_values = get_argument_values(arguments_node)
+        local args = get_args(argument_values, function_info)
+        -- TODO: Somehow deal with new lines heres? Or the existing formatting of the code?
+        local repl = "(" .. table.concat(args, ", ") .. ")"
+        local row_start, col_start, row_end, col_end = arguments_node:range()
+
+        vim.api.nvim_buf_set_text(0, row_start, col_start, row_end, col_end, { repl })
+    end
+end
+
+return M
