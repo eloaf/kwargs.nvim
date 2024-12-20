@@ -26,6 +26,30 @@
 --  foo(a=1, b=b)
 --  ```
 
+-- 1. Keyword Argument Toggle
+-- Allow toggling between positional and keyword arguments in a function call. For example:
+-- Toggle foo(a=1, b=2) back to foo(1, 2).
+--
+-- 2. Auto-Insert Default Values
+-- When calling a function, the plugin could suggest inserting default values for omitted keyword arguments:
+-- python
+-- Copy code
+-- def foo(a, b=42, c="hello"):
+--     return a + b
+-- Input: foo(1)
+-- Output: foo(a=1, b=42, c="hello")
+--
+-- 4. Dynamic Argument Rearranging
+-- Provide a shortcut to reorder function arguments based on their order in the function definition:
+-- python
+-- Copy code
+-- foo(b=2, a=1)
+-- Shortcut: Rearranges to foo(a=1, b=2).
+--
+-- Interesting idea: Transform Kwargs to dataclass Parameters: Refactor kwargs into a dataclass and update the function signature.
+
+
+
 local M = {}
 
 ---Prints the message if debug is true
