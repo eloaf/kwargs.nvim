@@ -48,101 +48,20 @@
 --
 -- Interesting idea: Transform Kwargs to dataclass Parameters: Refactor kwargs into a dataclass and update the function signature.
 
+-- Suppose we have a method called func:
+-- def func(self, param1, param2, /, param3, *, param4, param5):
+--      print(param1, param2, param3, param4, param5)
+-- It must called with
+-- obj.func(10, 20, 30, param4=50, param5=60)
+-- OR
+-- obj.func(10, 20, param3=30, param4=50, param5=60)
 
+
+local utils = require('kwargs.utils')
+local parsers = require('nvim-treesitter.parsers')
+local queries = require('kwargs.queries')
 
 local M = {}
-
----Prints the message if debug is true
----@param msg string
----@param debug boolean
-local function maybe_print(msg, debug)
-    if debug then
-        print(msg)
-    end
-end
-
--- WARNING: The query is not the same between languages it seems!
--- We'll need to create a query for each language we want to support...
---
--- Examples:
--- NOTE: lua
--- (function_call ; [565, 0] - [565, 15]
---   name: (identifier) ; [565, 0] - [565, 6]
---   arguments: (arguments ; [565, 6] - [565, 15]
---     (number) ; [565, 7] - [565, 8]
---     (number) ; [565, 10] - [565, 11]
---     (number))) ; [565, 13] - [565, 14]
--- Foobar(1, 2, 3)
-
--- NOTE: python
--- (call ; [51, 0] - [51, 21]
---   function: (identifier) ; [51, 0] - [51, 12]
---   arguments: (argument_list ; [51, 12] - [51, 21]
---     (integer) ; [51, 13] - [51, 14]
---     (integer) ; [51, 16] - [51, 17]
---     (integer)))) ; [51, 19] - [51, 20]
--- fn_with_args(1, 2, 3)
-
--- NOTE: Python has basic kwargs with a few rules.
---   1. You can't have non-keyword arguments after keyword arguments.
---   2. Arguments after a "*" are keyword-only arguments.
---   3. The symbol / can be used to separate positional-only arguments from positional-or-keyword arguments.
-
--- NOTE: According to ChatGPT: https://chatgpt.com/share/670be543-bf70-800a-a3e4-1e4b7611d074
--- (
---   (call
---     function: [
---       (identifier) @function
---       (attribute
---         object: (_)* @object
---         attribute: (identifier) @method
---       )
---     ]
---     arguments: (argument_list) @arguments
---   )
--- )
-
-
-local query_strings = {
-    python = [[
-        (
-          (call
-            function: [
-              (identifier)
-              (attribute
-                object: (_)*
-                attribute: (identifier)
-              )
-                ]
-            arguments: (argument_list)
-          ) @call
-        )
-    ]],
-    lua = [[
-        (function_call
-          name: (identifier) @function
-          arguments: (arguments) @arguments
-        )
-    ]]
-}
-
-
----Returns the treesitter query for the current language.
----@return vim.treesitter.Query
-local function get_query()
-    local parsers = require('nvim-treesitter.parsers')
-    local parser = parsers.get_parser()
-    local lang = parser:lang()
-
-    local query_string = query_strings[lang]
-    if query_string == nil then
-        error("Query string not found for language " .. lang)
-    end
-
-    local query = vim.treesitter.query.parse(lang, query_string)
-
-    return query
-end
 
 ---BFS on the tree under `node` to find the first node of type `target_type`
 ---@param node TSNode
@@ -166,14 +85,12 @@ local function find_first_node_of_type_bfs(node, target_type)
     error("Node not found")
 end
 
-
 ---@param mode string
 ---@return table<integer, TSNode>
 local function match_argument_nodes(mode)
-    local parsers = require('nvim-treesitter.parsers')
     local parser = parsers.get_parser()
     local tree = parser:parse()[1]
-    local query = get_query()
+    local query = queries.get_query()
 
     local start_line, end_line
 
@@ -270,14 +187,14 @@ local function lsp_supports_signature_help(debug)
         end
     end
 
-    maybe_print("Clients" .. #clients .. "Clients with signatureHelp" .. #clients_with_signature_help, debug)
+    utils.maybe_print("Clients" .. #clients .. "Clients with signatureHelp" .. #clients_with_signature_help, debug)
 
     if #clients_with_signature_help == 0 then
-        maybe_print("No LSP client attached", debug)
+        utils.maybe_print("No LSP client attached", debug)
         return nil
     end
 
-    maybe_print("LSP server supports signatureHelp", debug)
+    utils.maybe_print("LSP server supports signatureHelp", debug)
 
     return clients_with_signature_help[1]
 end
@@ -297,20 +214,6 @@ local function get_argument_values(arguments_node)
     return argument_values
 end
 
---- Returns true if the string contains an equal sign outside of parentheses.
----@param s string
----@return boolean
-local function contains_equal_outside_of_parentheses(s)
-    for i = 1, #s do
-        local char = s:sub(i, i)
-        if char == "=" then
-            return true
-        elseif char == "(" then
-            return false
-        end
-    end
-    return false
-end
 
 --- Returns a table of arguments using their keyword version.
 ---@param argument_values table<number, string>
@@ -327,7 +230,7 @@ local function get_args(argument_values, function_info)
         local arg_name = function_info[i]
         local arg_value = argument_values[i]
 
-        if contains_equal_outside_of_parentheses(arg_value) then
+        if utils.contains_equal_outside_of_parentheses(arg_value) then
             -- This is a keyword argument, we can just append the rest of the arguments
             break
         else
@@ -343,12 +246,17 @@ local function get_args(argument_values, function_info)
     return args
 end
 
+
+
+
+
 ---Expands the keyword arguments in the current line.
 ---@param mode string: The mode in which the function is called
 M.expand_keywords = function(mode)
     local debug = false
 
     if not lsp_supports_signature_help(debug) then
+        -- Here we could fallback to just searching the current file? How does `K` do it?
         return
     end
 
@@ -367,6 +275,15 @@ M.expand_keywords = function(mode)
 
         vim.api.nvim_buf_set_text(0, row_start, col_start, row_end, col_end, { repl })
     end
+end
+
+M.setup = function()
+    vim.api.nvim_set_keymap(
+        'n',
+        '<leader>ek',
+        '<cmd>lua require("kwargs").expand_keywords("n")<CR>',
+        { noremap = true, silent = true }
+    )
 end
 
 return M
