@@ -201,7 +201,7 @@ end
 
 --- @param arguments_node TSNode
 --- @return table<number, string>
-local function get_argument_values(arguments_node)
+local function get_arg_node_texts(arguments_node)
     local argument_values = {}
     for i = 0, arguments_node:named_child_count() - 1 do
         local arg = arguments_node:named_child(i)
@@ -247,28 +247,63 @@ local function get_args(argument_values, function_info)
 end
 
 
-
-
-
 ---Expands the keyword arguments in the current line.
 ---@param mode string: The mode in which the function is called
 M.expand_keywords = function(mode)
-    local debug = false
+    local debug = true
 
     if not lsp_supports_signature_help(debug) then
         -- Here we could fallback to just searching the current file? How does `K` do it?
+
+        -- Copilot:
+        -- If the LSP is not available, you can use Neovim's built-in `:help` command to get the documentation for a keyword.
+        -- You can capture the output of the `:help` command using the `vim.fn.execute` function.
+        -- Here's an example of how you can do this in Lua:
+
+        -- ```lua
+        -- local function get_help_contents(keyword)
+        --     -- Capture the output of the :help command
+        --     local help_output = vim.fn.execute('help ' .. keyword)
+        --     return help_output
+        -- end
+
+        -- -- Example usage
+        -- local keyword = vim.fn.expand('<cword>') -- Get the word under the cursor
+        -- local help_text = get_help_contents(keyword)
+        -- if help_text then
+        --     print(help_text)
+        -- end
+        -- ```
+
+        -- This function captures the output of the `:help` command for the given keyword and returns it as a string. You can then analyze the `help_text` variable as needed.
         return
     end
 
+    -- local argument_nodes: table<integer, TSNode>
     local argument_nodes = match_argument_nodes(mode)
+    utils.maybe_print("Argument nodes:", debug)
+    for i, n in ipairs(argument_nodes) do
+        local r = vim.treesitter.get_range(n)
+        local start_row, start_col, end_row, end_col = r[1], r[2], r[4], r[5]
+        utils.maybe_print(vim.api.nvim_buf_get_text(0, start_row, start_col, end_row, end_col, {}), debug)
+
+        local args_node = argument_nodes[i]
+        local arg_node_texts = get_arg_node_texts(args_node)
+        utils.maybe_print(vim.inspect(arg_node_texts), debug)
+
+        local function_info = get_function_info(args_node)
+    end
 
     for i = #argument_nodes, 1, -1 do
         -- arguments_node: TSNode
         local arguments_node = argument_nodes[i]
 
         local function_info = get_function_info(arguments_node)
-        local argument_values = get_argument_values(arguments_node)
-        local args = get_args(argument_values, function_info)
+        local arg_node_texts = get_arg_node_texts(arguments_node)
+
+
+
+        local args = get_args(arg_node_texts, function_info)
         -- TODO: Somehow deal with new lines heres? Or the existing formatting of the code?
         local repl = "(" .. table.concat(args, ", ") .. ")"
         local row_start, col_start, row_end, col_end = arguments_node:range()
@@ -282,6 +317,12 @@ M.setup = function()
         'n',
         '<leader>ek',
         '<cmd>lua require("kwargs").expand_keywords("n")<CR>',
+        { noremap = true, silent = true }
+    )
+    vim.api.nvim_set_keymap(
+        'v',
+        '<leader>ek',
+        '<cmd>lua require("kwargs").expand_keywords("v")<CR>',
         { noremap = true, silent = true }
     )
 end
