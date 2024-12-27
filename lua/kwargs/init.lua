@@ -1,7 +1,5 @@
 local languages = require('kwargs.languages')
 
-local debug = false
-
 local M = {}
 
 local function get_language_module()
@@ -13,10 +11,15 @@ local function get_language_module()
     end
 end
 
-M.expand_keywords = function(mode)
+M.expand_keywords = function()
     local lang_module = get_language_module()
     -- TODO: Figure out if we really need to pass the mode...
-    lang_module.expand_keywords(mode)
+    lang_module.expand_keywords()
+end
+
+M.contract_keywords = function()
+    local lang_module = get_language_module()
+    lang_module.contract_keywords()
 end
 
 -- Expand keywords
@@ -35,7 +38,9 @@ local function set_keymap(modes, lhs, rhs, opts)
 end
 
 M.setup = function()
-    set_keymap({ 'n', 'v' }, '<leader>ek', '<cmd>lua require("kwargs").expand_keywords(vim.fn.mode())<CR>',
+    set_keymap({ 'n', 'v' }, '<leader>ke', '<cmd>lua require("kwargs").expand_keywords()<CR>',
+        { noremap = true, silent = true })
+    set_keymap({ 'n', 'v' }, '<leader>kc', '<cmd>lua require("kwargs").contract_keywords()<CR>',
         { noremap = true, silent = true })
 end
 

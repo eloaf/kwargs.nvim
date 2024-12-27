@@ -24,21 +24,29 @@ local ts_query_string = [[
 ]]
 
 
----@param mode string
 ---@return table<integer, TSNode>
-local function get_call_nodes(mode)
+local function get_call_nodes()
     local parser = parsers.get_parser()
     local tree = parser:parse()[1]
     local query = vim.treesitter.query.parse("python", ts_query_string)
 
+    -- local start_line, end_line
+    local start_line = nil
+    local end_line = nil
 
+    local mode = vim.api.nvim_get_mode()["mode"]
 
-    local start_line, end_line
+    print(mode)
 
-    if mode == 'v' then
+    -- WARNING: Visual selection problem - the marks are lagging behind by one action.
+    -- I guess we somehow need to have as input the mode?
+
+    if mode == 'V' or mode == 'v' then
         -- Visual mode
         start_line = vim.fn.line("'<") - 1
         end_line = vim.fn.line("'>")
+        -- How to send Esc?
+        vim.cmd(":yank k")
     elseif mode == 'n' then
         -- Normal mode
         start_line = vim.fn.line('.') - 1
@@ -46,6 +54,9 @@ local function get_call_nodes(mode)
     else
         error("Invalid mode")
     end
+
+    print("Start line: " .. start_line)
+    print("End line: " .. end_line)
 
     --- @type table<integer, TSNode>
     local call_nodes = {}
@@ -258,8 +269,7 @@ local function lsp_supports_signature_help()
 end
 
 ---Expands the keyword arguments in the current line.
----@param mode string: The mode in which the function is called
-M.expand_keywords = function(mode)
+M.expand_keywords = function()
     if not lsp_supports_signature_help() then
         -- Here we could fallback to just searching the current file? How does `K` do it?
 
@@ -287,7 +297,7 @@ M.expand_keywords = function(mode)
         return
     end
 
-    local call_nodes = get_call_nodes(mode)
+    local call_nodes = get_call_nodes()
 
     local aligned_data = {}
 
@@ -360,6 +370,65 @@ M.expand_keywords = function(mode)
         end
 
         aligned_data[#aligned_data + 1] = aligned
+    end
+end
+
+-- TODO: Experimental
+M.contract_keywords = function()
+    local call_nodes = get_call_nodes()
+
+    for i = #call_nodes, 1, -1 do
+        local call_node = call_nodes[i]
+        local signature = get_function_signature(call_node)
+        local call_values = get_call_values(call_node)
+
+        local aligned = {}
+        for j, call_value in ipairs(call_values) do
+            -- find the arg in the signature
+            local index = nil
+            for k, signature_arg in ipairs(signature) do
+                if signature_arg.name == call_value["name"] then
+                    index = k
+                    break
+                end
+            end
+            -- TODO: crashes here...
+            if index == nil then
+                error("Argument not found in signature")
+            end
+            aligned[#aligned + 1] = {
+                name = call_value["name"],
+                value = call_value["value"],
+                node = call_value["node"],
+                index = index,
+                positional_only = signature[index].positional_only,
+                keyword_only = signature[index].keyword_only,
+                default = signature[index].default,
+            }
+        end
+
+        -- here we can iterate backwords over the aligned arguments and insert them into the buffer
+        for j = #aligned, 1, -1 do
+            local data = aligned[j]
+            if data["positional_only"] == true then
+                -- Nothing to do here
+                goto continue
+            end
+
+            ---@type TSNode
+            local node = data["node"]
+            local row_start, col_start, row_end, col_end = node:range()
+            vim.api.nvim_buf_set_text(
+                0,
+                row_start,
+                col_start,
+                row_end,
+                col_end,
+                { data["value"] }
+            )
+
+            ::continue::
+        end
     end
 end
 
