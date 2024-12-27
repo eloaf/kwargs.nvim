@@ -42,17 +42,34 @@ local M = {}
 --   )
 -- )
 local query_strings = {
+    -- python = [[
+    --     (
+    --       (call
+    --         function: [
+    --           (identifier)
+    --           (attribute
+    --             object: (_)*
+    --             attribute: (identifier)
+    --           )
+    --             ]
+    --         arguments: (argument_list)
+    --       ) @call
+    --     )
+    -- ]],
     python = [[
         (
           (call
             function: [
-              (identifier)
+              (identifier) @identifier
               (attribute
-                object: (_)*
+                object: (_)
                 attribute: (identifier)
               )
-                ]
-            arguments: (argument_list)
+            ]
+            arguments:
+              (argument_list
+                (_)* @arg
+              ) @list
           ) @call
         )
     ]],

@@ -61,6 +61,8 @@ local utils = require('kwargs.utils')
 local parsers = require('nvim-treesitter.parsers')
 local queries = require('kwargs.queries')
 
+local debug = false
+
 local M = {}
 
 ---BFS on the tree under `node` to find the first node of type `target_type`
@@ -87,7 +89,7 @@ end
 
 ---@param mode string
 ---@return table<integer, TSNode>
-local function match_argument_nodes(mode)
+local function get_call_nodes(mode)
     local parser = parsers.get_parser()
     local tree = parser:parse()[1]
     local query = queries.get_query()
@@ -106,22 +108,77 @@ local function match_argument_nodes(mode)
         error("Invalid mode")
     end
 
-    local results = {}
-
-    for _, node, _, _ in query:iter_captures(tree:root(), 0, start_line, end_line) do
-        local arguments_node = find_first_node_of_type_bfs(node, "argument_list")
-        results[#results + 1] = arguments_node
+    --- @type table<integer, TSNode>
+    local call_nodes = {}
+    for id, node, _, _ in query:iter_captures(tree:root(), 0, start_line, end_line) do
+        local capture_name = query.captures[id]
+        if capture_name == "call" then
+            call_nodes[#call_nodes + 1] = node
+        end
     end
 
-    return results
+    -- TODO: Are the results guaranteed to be in order?
+    -- print("Call nodes:", vim.inspect(call_nodes))
+
+    return call_nodes
+end
+
+--- Returns a table containing the positional and keyword arguments from the call node.
+--- @param call_node TSNode
+--- @return table
+local function get_call_values(call_node)
+    if call_node:type() ~= "call" then
+        error("Node is not a call node")
+    end
+
+    local argument_list_node = find_first_node_of_type_bfs(call_node, "argument_list")
+
+    if argument_list_node == nil then
+        error("No argument list node found")
+    end
+
+    local discarded_node_types = {
+        [","] = true,
+        ["("] = true,
+        [")"] = true,
+    }
+
+    local result = {}
+
+    for child_node, _ in argument_list_node:iter_children() do
+        if discarded_node_types[child_node:type()] == true then
+            goto continue
+        end
+
+        local text = vim.treesitter.get_node_text(child_node, 0)
+
+        local entry = { name = nil, value = text, node = child_node }
+        if child_node:type() == "keyword_argument" then
+            local pos = string.find(text, "=")
+            entry.name = string.sub(text, 1, pos - 1)
+            entry.value = string.sub(text, pos + 1)
+        end
+        result[#result + 1] = entry
+
+        ::continue::
+    end
+
+    return result
 end
 
 
----@param arguments_node TSNode
----@return table
-local function get_params_from_arguments_node(arguments_node)
+--- TODO
+--- @param call_node TSNode
+--- @return table
+local function get_params_from_call_node(call_node)
+    local argument_list_node = find_first_node_of_type_bfs(call_node, "argument_list")
+
+    if argument_list_node == nil then
+        error("No arguments node found")
+    end
+
     -- Extract the position from arguments_node
-    local start_row, start_col = arguments_node:start()
+    local start_row, start_col = argument_list_node:start()
 
     -- Create params using the position
     local params = {
@@ -132,10 +189,21 @@ local function get_params_from_arguments_node(arguments_node)
 end
 
 
---- TODO: comment, rename this function? it returns the arguments list...
---- @param arguments_node TSNode
-local function get_function_info(arguments_node)
-    local params = get_params_from_arguments_node(arguments_node)
+--- Retrieves a function's signature and reformats it into a table of tables.
+--- @param call_node TSNode: The node representing the function call.
+--- @return table: A table containing the function's arguments with their details.
+--- Each argument is represented as a table with the following fields:
+--- - name (string): The name of the argument.
+--- - type (string|nil): The type hint of the argument, if any.
+--- - default (string|nil): The default value of the argument, if any.
+--- - positional_only (boolean): Whether the argument is positional only.
+--- - keyword_only (boolean): Whether the argument is keyword only.
+local function get_function_signature(call_node)
+    if call_node:type() ~= "call" then
+        error("Node is not a call node")
+    end
+
+    local params = get_params_from_call_node(call_node)
 
     -- WARNING: Not sure I understand this...
     params.position.character = params.position.character + 1
@@ -147,36 +215,90 @@ local function get_function_info(arguments_node)
         error("No result returned!")
     end
 
-    -- TODO: May want to reformat the results...
     local key = next(result)
 
-    local arguments = {}
-
-    if result and result[key] and result[key].result and result[key].result.signatures then
-        local signature = result[key].result.signatures[1]
-        local label = signature.label
-        local parameters = signature.parameters
-
-        for _, param in ipairs(parameters) do
-            local start_idx = param.label[1] + 1
-            local end_idx = param.label[2]
-            local arg_name = label:sub(start_idx, end_idx)
-            -- split by `:` and get the first part
-            arg_name = arg_name:match("([^:]+)")
-            -- print("arg name=" .. arg_name)
-            arguments[#arguments + 1] = arg_name
-        end
-    else
+    if not (result and result[key] and result[key].result and result[key].result.signatures) then
         error("No signature help available!")
     end
 
-    return arguments
+    local signature = result[key].result.signatures[1]
+    local label = signature.label
+    local parameters = signature.parameters
+
+    local arg_texts = {}
+    for _, parameter in ipairs(parameters) do
+        local start_end = parameter.label
+        local arg_text = string.sub(label, 1 + start_end[1], start_end[2])
+        arg_texts[#arg_texts + 1] = arg_text
+    end
+
+    -- print("Arg texts: " .. vim.inspect(arg_texts))
+
+    local arg_data = {}
+
+    local keyword_only = false
+
+    for _, arg_text in ipairs(arg_texts) do
+        -- print("Arg text: " .. arg_text)
+
+        if arg_text == "/" then
+            for i = #arg_data, 1, -1 do
+                arg_data[i].positional_only = true
+            end
+            goto continue
+        elseif arg_text == "*" then
+            keyword_only = true
+            goto continue
+        end
+
+        local column_start, _ = string.find(arg_text, ":")
+        local equals_start, _ = string.find(arg_text, "=")
+
+        local type_hint = nil
+        local default_value = nil
+        local arg_name = nil
+
+        if column_start == nil and equals_start == nil then
+            -- No type hint and no default value
+            -- a
+            arg_name = arg_text
+        elseif column_start == nil and equals_start ~= nil then
+            -- No type hint but has a default value
+            -- a = 1
+            arg_name = string.match(arg_text, "([%a%s_]+)")
+            default_value = string.match(arg_text, "[%a%s_]+ ?= ?(.+)")
+        elseif column_start ~= nil and equals_start == nil then
+            -- A type hint but no default value
+            -- a: int
+            arg_name = string.match(arg_text, "([%a%s_]+)")
+            type_hint = string.match(arg_text, "[%a%s_]+ ?: ?([^=])+")
+        elseif column_start ~= nil and equals_start ~= nil then
+            -- A type hint and a default value
+            -- a: int = 1
+            arg_name = string.match(arg_text, "([%a%s_]+)")
+            type_hint = string.match(arg_text, "[%a%s_]+ ?: ?([^=])+")
+            default_value = string.match(arg_text, ".+ ?= ?(.+)")
+        end
+
+        local index = #arg_data + 1
+        arg_data[#arg_data + 1] = {
+            index = index,
+            name = arg_name,
+            type = type_hint,
+            default = default_value,
+            positional_only = false,
+            keyword_only = keyword_only,
+        }
+
+        ::continue:: -- WARNING:
+    end
+
+    return arg_data
 end
 
 --- Returns the first LSP client that supports signature help.
----@param debug boolean: Whether to print debug information
 ---@return vim.lsp.Client?
-local function lsp_supports_signature_help(debug)
+local function lsp_supports_signature_help()
     -- Ensure the LSP client is attached
     local clients = vim.lsp.get_clients()
 
@@ -199,60 +321,10 @@ local function lsp_supports_signature_help(debug)
     return clients_with_signature_help[1]
 end
 
---- @param arguments_node TSNode
---- @return table<number, string>
-local function get_arg_node_texts(arguments_node)
-    local argument_values = {}
-    for i = 0, arguments_node:named_child_count() - 1 do
-        local arg = arguments_node:named_child(i)
-        if arg == nil then
-            error("Argument is nil")
-        end
-        local arg_value = vim.treesitter.get_node_text(arg, 0)
-        argument_values[#argument_values + 1] = arg_value
-    end
-    return argument_values
-end
-
-
---- Returns a table of arguments using their keyword version.
----@param argument_values table<number, string>
----@param function_info table<number, string>
----@return table<number, string>
-local function get_args(argument_values, function_info)
-    -- NOTE: in python you can't have non-keyword arguments after keyword arguments
-    -- Therefore, we can just append the rest of the arguments as they are as soon
-    -- as we encounter a keyword argument.
-
-    local args = {}
-
-    for i = 1, #argument_values do
-        local arg_name = function_info[i]
-        local arg_value = argument_values[i]
-
-        if utils.contains_equal_outside_of_parentheses(arg_value) then
-            -- This is a keyword argument, we can just append the rest of the arguments
-            break
-        else
-            args[#args + 1] = arg_name .. "=" .. arg_value
-        end
-    end
-
-    for i = #args + 1, #argument_values do
-        local arg_value = argument_values[i]
-        args[#args + 1] = arg_value
-    end
-
-    return args
-end
-
-
 ---Expands the keyword arguments in the current line.
 ---@param mode string: The mode in which the function is called
 M.expand_keywords = function(mode)
-    local debug = true
-
-    if not lsp_supports_signature_help(debug) then
+    if not lsp_supports_signature_help() then
         -- Here we could fallback to just searching the current file? How does `K` do it?
 
         -- Copilot:
@@ -279,52 +351,100 @@ M.expand_keywords = function(mode)
         return
     end
 
-    -- local argument_nodes: table<integer, TSNode>
-    local argument_nodes = match_argument_nodes(mode)
-    utils.maybe_print("Argument nodes:", debug)
-    for i, n in ipairs(argument_nodes) do
-        local r = vim.treesitter.get_range(n)
-        local start_row, start_col, end_row, end_col = r[1], r[2], r[4], r[5]
-        utils.maybe_print(vim.api.nvim_buf_get_text(0, start_row, start_col, end_row, end_col, {}), debug)
+    local call_nodes = get_call_nodes(mode)
 
-        local args_node = argument_nodes[i]
-        local arg_node_texts = get_arg_node_texts(args_node)
-        utils.maybe_print(vim.inspect(arg_node_texts), debug)
+    local aligned_data = {}
 
-        local function_info = get_function_info(args_node)
+    for i = #call_nodes, 1, -1 do
+        local call_node = call_nodes[i]
+        local signature = get_function_signature(call_node)
+        local call_values = get_call_values(call_node)
+
+        local positional_call_values = vim.tbl_filter(function(x) return x["name"] == nil end, call_values)
+        local keyword_call_values = vim.tbl_filter(function(x) return x["name"] ~= nil end, call_values)
+
+        local aligned = {}
+        for j, call_value in ipairs(positional_call_values) do
+            aligned[#aligned + 1] = {
+                name = signature[j].name,
+                value = call_value["value"],
+                node = call_value["node"],
+                index = signature[j].index,
+                positional_only = signature[j].positional_only,
+                keyword_only = signature[j].keyword_only,
+                default = signature[j].default,
+            }
+        end
+
+        for _, call_value in ipairs(keyword_call_values) do
+            -- TODO: Move to function
+            -- find the arg in the signature
+            local index = nil
+            for k, signature_arg in ipairs(signature) do
+                if signature_arg.name == call_value["name"] then
+                    index = k
+                    break
+                end
+            end
+            if index == nil then
+                error("Argument not found in signature")
+            end
+            aligned[#aligned + 1] = {
+                name = call_value["name"],
+                value = call_value["value"],
+                node = call_value["node"],
+                index = index,
+                positional_only = signature[index].positional_only,
+                keyword_only = signature[index].keyword_only,
+                default = signature[index].default,
+            }
+        end
+
+        -- here we can iterate backwords over the aligned arguments and insert them into the buffer
+        for j = #aligned, 1, -1 do
+            local data = aligned[j]
+            if data["positional_only"] == true then
+                -- Nothing to do here
+                goto continue
+            end
+
+            ---@type TSNode
+            local node = data["node"]
+            local row_start, col_start, row_end, col_end = node:range()
+            vim.api.nvim_buf_set_text(
+                0,
+                row_start,
+                col_start,
+                row_end,
+                col_end,
+                { data["name"] .. "=" .. data["value"] }
+            )
+
+            ::continue::
+        end
+
+        aligned_data[#aligned_data + 1] = aligned
     end
+end
 
-    for i = #argument_nodes, 1, -1 do
-        -- arguments_node: TSNode
-        local arguments_node = argument_nodes[i]
+-- Expand keywords
+--  Unexpand keywords (must re-order the arguments if necessary)
+-- Insert default values
+--  Remove default values if literals match the default values?
+-- Total cleanup
+--  Expand keywords
+--  Reorder arguments
+--  Insert default values
 
-        local function_info = get_function_info(arguments_node)
-        local arg_node_texts = get_arg_node_texts(arguments_node)
-
-
-
-        local args = get_args(arg_node_texts, function_info)
-        -- TODO: Somehow deal with new lines heres? Or the existing formatting of the code?
-        local repl = "(" .. table.concat(args, ", ") .. ")"
-        local row_start, col_start, row_end, col_end = arguments_node:range()
-
-        vim.api.nvim_buf_set_text(0, row_start, col_start, row_end, col_end, { repl })
+local function set_keymap(modes, lhs, rhs, opts)
+    for _, mode in ipairs(modes) do
+        vim.api.nvim_set_keymap(mode, lhs, rhs, opts)
     end
 end
 
 M.setup = function()
-    vim.api.nvim_set_keymap(
-        'n',
-        '<leader>ek',
-        '<cmd>lua require("kwargs").expand_keywords("n")<CR>',
-        { noremap = true, silent = true }
-    )
-    vim.api.nvim_set_keymap(
-        'v',
-        '<leader>ek',
-        '<cmd>lua require("kwargs").expand_keywords("v")<CR>',
-        { noremap = true, silent = true }
-    )
+    set_keymap({ 'n', 'v' }, '<leader>ek', '<cmd>lua require("kwargs").expand_keywords(vim.fn.mode())<CR>',
+        { noremap = true, silent = true })
 end
 
 return M
