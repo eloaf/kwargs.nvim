@@ -22,6 +22,11 @@ M.contract_keywords = function()
     lang_module.contract_keywords()
 end
 
+-- M.insert_defaults = function()
+--     local lang_module = get_language_module()
+--     lang_module.insert_defaults()
+-- end
+
 -- Expand keywords
 --  Unexpand keywords (must re-order the arguments if necessary)
 -- Insert default values
@@ -42,6 +47,8 @@ M.setup = function()
         { noremap = true, silent = true })
     set_keymap({ 'n', 'v' }, '<leader>kc', '<cmd>lua require("kwargs").contract_keywords()<CR>',
         { noremap = true, silent = true })
+    -- set_keymap({ 'n', 'v' }, '<leader>kd', '<cmd>lua require("kwargs").insert_defaults()<CR>',
+    --     { noremap = true, silent = true })
 end
 
 return M

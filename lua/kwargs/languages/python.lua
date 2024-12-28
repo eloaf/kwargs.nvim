@@ -36,17 +36,18 @@ local function get_call_nodes()
 
     local mode = vim.api.nvim_get_mode()["mode"]
 
-    print(mode)
+    -- print(mode)
 
     -- WARNING: Visual selection problem - the marks are lagging behind by one action.
     -- I guess we somehow need to have as input the mode?
 
+    -- TODO: This is broken
     if mode == 'V' or mode == 'v' then
         -- Visual mode
         start_line = vim.fn.line("'<") - 1
         end_line = vim.fn.line("'>")
-        -- How to send Esc?
-        vim.cmd(":yank k")
+        -- -- How to send Esc?
+        -- vim.cmd(":yank k")
     elseif mode == 'n' then
         -- Normal mode
         start_line = vim.fn.line('.') - 1
@@ -55,8 +56,8 @@ local function get_call_nodes()
         error("Invalid mode")
     end
 
-    print("Start line: " .. start_line)
-    print("End line: " .. end_line)
+    -- print("Start line: " .. start_line)
+    -- print("End line: " .. end_line)
 
     --- @type table<integer, TSNode>
     local call_nodes = {}
@@ -237,7 +238,7 @@ local function get_function_signature(call_node)
             keyword_only = keyword_only,
         }
 
-        ::continue:: -- WARNING:
+        ::continue::
     end
 
     return arg_data
@@ -268,32 +269,103 @@ local function lsp_supports_signature_help()
     return clients_with_signature_help[1]
 end
 
+--- Processes a function call node and aligns the call values with the function signature.
+-- @param call_node The AST node representing the function call.
+-- @return A table containing aligned call values with their corresponding signature details.
+-- Each entry in the table includes:
+--   - name: The name of the argument.
+--   - value: The value passed to the argument.
+--   - node: The AST node of the call value.
+--   - index: The index of the argument in the function signature.
+--   - positional_only: Boolean indicating if the argument is positional only.
+--   - keyword_only: Boolean indicating if the argument is keyword only.
+--   - default: The default value of the argument, if any.
+local function process_call_code(call_node)
+    local signature = get_function_signature(call_node)
+    local call_values = get_call_values(call_node)
+
+    local positional_call_values = vim.tbl_filter(function(x) return x["name"] == nil end, call_values)
+    local keyword_call_values = vim.tbl_filter(function(x) return x["name"] ~= nil end, call_values)
+
+    local aligned = {}
+    for j, call_value in ipairs(positional_call_values) do
+        aligned[#aligned + 1] = {
+            name = signature[j].name,
+            value = call_value["value"],
+            node = call_value["node"],
+            index = signature[j].index,
+            positional_only = signature[j].positional_only,
+            keyword_only = signature[j].keyword_only,
+            default = signature[j].default,
+        }
+    end
+
+    for _, call_value in ipairs(keyword_call_values) do
+        -- TODO: Move to function
+        -- find the arg in the signature
+        local index = nil
+        for k, signature_arg in ipairs(signature) do
+            if signature_arg.name == call_value["name"] then
+                index = k
+                break
+            end
+        end
+        if index == nil then
+            error("Argument not found in signature")
+        end
+        aligned[#aligned + 1] = {
+            name = call_value["name"],
+            value = call_value["value"],
+            node = call_value["node"],
+            index = index,
+            positional_only = signature[index].positional_only,
+            keyword_only = signature[index].keyword_only,
+            default = signature[index].default,
+        }
+    end
+
+    -- -- Optionally add the remaining signature arguments that were not passed
+    -- for i = #aligned + 1, #signature do
+    --     aligned[#aligned + 1] = {
+    --         name = signature[i].name,
+    --         value = signature[i].default,
+    --         node = nil,
+    --         index = signature[i].index,
+    --         positional_only = signature[i].positional_only,
+    --         keyword_only = signature[i].keyword_only,
+    --         default = signature[i].default,
+    --     }
+    -- end
+
+    return aligned
+end
+
+
+-- NOTE: What to do when the LSP is not available?
+-- Here we could fallback to just searching the current file? How does `K` do it?
+-- Copilot:
+-- If the LSP is not available, you can use Neovim's built-in `:help` command to get the documentation for a keyword.
+-- You can capture the output of the `:help` command using the `vim.fn.execute` function.
+-- Here's an example of how you can do this in Lua:
+-- ```lua
+-- local function get_help_contents(keyword)
+--     -- Capture the output of the :help command
+--     local help_output = vim.fn.execute('help ' .. keyword)
+--     return help_output
+-- end
+-- Example usage
+-- local keyword = vim.fn.expand('<cword>') -- Get the word under the cursor
+-- local help_text = get_help_contents(keyword)
+-- if help_text then
+--     print(help_text)
+-- end
+-- ```
+
+-- This function captures the output of the `:help` command for the given keyword and returns it as a string. You can then analyze the `help_text` variable as needed.
+
 ---Expands the keyword arguments in the current line.
 M.expand_keywords = function()
     if not lsp_supports_signature_help() then
-        -- Here we could fallback to just searching the current file? How does `K` do it?
-
-        -- Copilot:
-        -- If the LSP is not available, you can use Neovim's built-in `:help` command to get the documentation for a keyword.
-        -- You can capture the output of the `:help` command using the `vim.fn.execute` function.
-        -- Here's an example of how you can do this in Lua:
-
-        -- ```lua
-        -- local function get_help_contents(keyword)
-        --     -- Capture the output of the :help command
-        --     local help_output = vim.fn.execute('help ' .. keyword)
-        --     return help_output
-        -- end
-
-        -- -- Example usage
-        -- local keyword = vim.fn.expand('<cword>') -- Get the word under the cursor
-        -- local help_text = get_help_contents(keyword)
-        -- if help_text then
-        --     print(help_text)
-        -- end
-        -- ```
-
-        -- This function captures the output of the `:help` command for the given keyword and returns it as a string. You can then analyze the `help_text` variable as needed.
         return
     end
 
@@ -303,48 +375,7 @@ M.expand_keywords = function()
 
     for i = #call_nodes, 1, -1 do
         local call_node = call_nodes[i]
-        local signature = get_function_signature(call_node)
-        local call_values = get_call_values(call_node)
-
-        local positional_call_values = vim.tbl_filter(function(x) return x["name"] == nil end, call_values)
-        local keyword_call_values = vim.tbl_filter(function(x) return x["name"] ~= nil end, call_values)
-
-        local aligned = {}
-        for j, call_value in ipairs(positional_call_values) do
-            aligned[#aligned + 1] = {
-                name = signature[j].name,
-                value = call_value["value"],
-                node = call_value["node"],
-                index = signature[j].index,
-                positional_only = signature[j].positional_only,
-                keyword_only = signature[j].keyword_only,
-                default = signature[j].default,
-            }
-        end
-
-        for _, call_value in ipairs(keyword_call_values) do
-            -- TODO: Move to function
-            -- find the arg in the signature
-            local index = nil
-            for k, signature_arg in ipairs(signature) do
-                if signature_arg.name == call_value["name"] then
-                    index = k
-                    break
-                end
-            end
-            if index == nil then
-                error("Argument not found in signature")
-            end
-            aligned[#aligned + 1] = {
-                name = call_value["name"],
-                value = call_value["value"],
-                node = call_value["node"],
-                index = index,
-                positional_only = signature[index].positional_only,
-                keyword_only = signature[index].keyword_only,
-                default = signature[index].default,
-            }
-        end
+        local aligned = process_call_code(call_node)
 
         -- here we can iterate backwords over the aligned arguments and insert them into the buffer
         for j = #aligned, 1, -1 do
@@ -357,14 +388,7 @@ M.expand_keywords = function()
             ---@type TSNode
             local node = data["node"]
             local row_start, col_start, row_end, col_end = node:range()
-            vim.api.nvim_buf_set_text(
-                0,
-                row_start,
-                col_start,
-                row_end,
-                col_end,
-                { data["name"] .. "=" .. data["value"] }
-            )
+            vim.api.nvim_buf_set_text(0, row_start, col_start, row_end, col_end, { data["name"] .. "=" .. data["value"] })
 
             ::continue::
         end
@@ -373,44 +397,21 @@ M.expand_keywords = function()
     end
 end
 
--- TODO: Experimental
 M.contract_keywords = function()
+    if not lsp_supports_signature_help() then
+        return
+    end
+
     local call_nodes = get_call_nodes()
 
     for i = #call_nodes, 1, -1 do
         local call_node = call_nodes[i]
-        local signature = get_function_signature(call_node)
-        local call_values = get_call_values(call_node)
-
-        local aligned = {}
-        for j, call_value in ipairs(call_values) do
-            -- find the arg in the signature
-            local index = nil
-            for k, signature_arg in ipairs(signature) do
-                if signature_arg.name == call_value["name"] then
-                    index = k
-                    break
-                end
-            end
-            -- TODO: crashes here...
-            if index == nil then
-                error("Argument not found in signature")
-            end
-            aligned[#aligned + 1] = {
-                name = call_value["name"],
-                value = call_value["value"],
-                node = call_value["node"],
-                index = index,
-                positional_only = signature[index].positional_only,
-                keyword_only = signature[index].keyword_only,
-                default = signature[index].default,
-            }
-        end
+        local aligned = process_call_code(call_node)
 
         -- here we can iterate backwords over the aligned arguments and insert them into the buffer
         for j = #aligned, 1, -1 do
             local data = aligned[j]
-            if data["positional_only"] == true then
+            if data["keyword_only"] == true then
                 -- Nothing to do here
                 goto continue
             end
@@ -418,18 +419,49 @@ M.contract_keywords = function()
             ---@type TSNode
             local node = data["node"]
             local row_start, col_start, row_end, col_end = node:range()
-            vim.api.nvim_buf_set_text(
-                0,
-                row_start,
-                col_start,
-                row_end,
-                col_end,
-                { data["value"] }
-            )
+            vim.api.nvim_buf_set_text(0, row_start, col_start, row_end, col_end, { data["value"] })
 
             ::continue::
         end
     end
 end
+
+-- -- Actually this is harder because we need to insert new text, not just modify existing nodes!
+-- M.insert_defaults = function()
+--     if not lsp_supports_signature_help() then
+--         return
+--     end
+
+--     local call_nodes = get_call_nodes()
+
+--     for i = #call_nodes, 1, -1 do
+--         local call_node = call_nodes[i]
+--         local aligned = process_call_code(call_node)
+
+--         -- here we can iterate backwords over the aligned arguments and insert them into the buffer
+--         for j = #aligned, 1, -1 do
+--             local data = aligned[j]
+--             local default = data["default"]
+
+--             if default == nil then
+--                 goto continue
+--             end
+
+--             ---@type TSNode
+--             local node = data["node"]
+--             local row_start, col_start, row_end, col_end = node:range()
+--             print("default: " .. default)
+
+--             -- Actually if its a keyword only argument we should insert default default as a kwarg
+--             local replacement = default
+--             if data["keyword_only"] == true then
+--                 replacement = data["name"] .. "=" .. replacement
+--             end
+--             vim.api.nvim_buf_set_text(0, row_start, col_start, row_end, col_end, { replacement })
+
+--             ::continue::
+--         end
+--     end
+-- end
 
 return M
