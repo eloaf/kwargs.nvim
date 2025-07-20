@@ -419,7 +419,9 @@ M.contract_keywords = function()
             ---@type TSNode
             local node = data["node"]
             local row_start, col_start, row_end, col_end = node:range()
-            vim.api.nvim_buf_set_text(0, row_start, col_start, row_end, col_end, { data["value"] })
+            local replacement = data["value"]
+            local lines = vim.split(replacement, "\n", { trimempty = true })
+            vim.api.nvim_buf_set_text(0, row_start, col_start, row_end, col_end, lines)
 
             ::continue::
         end
