@@ -99,3 +99,7 @@ OR
 ```python
 obj.func(10, 20, param3=30, param4=50, param5=60)
 ```
+
+Options
+- Recursive option -> go up all function calls vs only the local one
+- Option to insert default kwargs

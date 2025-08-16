@@ -421,6 +421,13 @@ M.contract_keywords = function()
             local row_start, col_start, row_end, col_end = node:range()
             local replacement = data["value"]
             local lines = vim.split(replacement, "\n", { trimempty = true })
+
+            -- Clamp col_end to the line length
+            local line_length = #vim.api.nvim_buf_get_lines(0, row_end, row_end + 1, false)[1]
+            if col_end > line_length then
+                col_end = line_length
+            end
+
             vim.api.nvim_buf_set_text(0, row_start, col_start, row_end, col_end, lines)
 
             ::continue::
