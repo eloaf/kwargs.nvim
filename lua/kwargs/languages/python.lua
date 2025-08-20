@@ -1,42 +1,44 @@
 local utils = require('kwargs.utils')
 local parsers = require('nvim-treesitter.parsers')
 
-local debug = false
-
 local M = {}
 
+-- local ts_query_string = [[
+--     (
+--       (call
+--         function: [
+--           (identifier) @identifier
+--           (attribute
+--             object: (_)
+--             attribute: (identifier)
+--           )
+--         ]
+--         arguments: (argument_list
+--           (_) @arg)*
+--         ) @list
+--       ) @call
+-- ]]
+-- local ts_query_string = [[
+--     (call
+--       function: (identifier)
+--       arguments: (argument_list
+--         (_))*
+--      @call)
+-- ]]
+
+
 local ts_query_string = [[
-    (
-      (call
-        function: [
-          (identifier) @identifier
-          (attribute
-            object: (_)
-            attribute: (identifier)
-          )
-        ]
-        arguments:
-          (argument_list
-            (_)* @arg
-          ) @list
-      ) @call
-    )
+    (call (_)) @call
 ]]
 
 
----@return table<integer, TSNode>
-local function get_call_nodes()
-    local parser = parsers.get_parser()
-    local tree = parser:parse()[1]
-    local query = vim.treesitter.query.parse("python", ts_query_string)
-
-    -- local start_line, end_line
+--- Find the start and end line of the current selection or line.
+---@return integer, integer
+local function get_start_and_end_line()
     local start_line = nil
     local end_line = nil
 
     local mode = vim.api.nvim_get_mode()["mode"]
-
-    -- print(mode)
 
     -- WARNING: Visual selection problem - the marks are lagging behind by one action.
     -- I guess we somehow need to have as input the mode?
@@ -49,20 +51,53 @@ local function get_call_nodes()
         -- -- How to send Esc?
         -- vim.cmd(":yank k")
     elseif mode == 'n' then
-        -- Normal mode
         start_line = vim.fn.line('.') - 1
         end_line = start_line + 1
     else
         error("Invalid mode")
     end
+    return start_line, end_line
+end
 
-    -- print("Start line: " .. start_line)
-    -- print("End line: " .. end_line)
+-- Its simpler to get the node we need then find the first set of children... I think
+-- Then we can produce the list of edits we need to do
+-- 1. Get all call nodes in the current selection
+-- 2. For each call node, get the argument_list node and the identifier node
+-- 3. Get the function signature for the identifier node (or wherever the cursor needs to be at)
+-- 4. Align the arguments in the argument_list node with the function signature
+-- 5. Produce a list of edits to apply to the buffer (applied in reverse order). The edits are not replacing text, simply inserting new text, with `keyword=` wherever appropriate.
+
+--- Return the argument list of a call node.
+---@param call_node TSNode
+local function get_argument_list(call_node)
+    if call_node:type() ~= "call" then
+        print(call_node:type())
+        error("Node is not a call node")
+    end
+    local argument_list_node = utils.find_first_node_of_type_bfs(call_node, "argument_list")
+    if argument_list_node == nil then
+        error("No argument list node found")
+    end
+    return argument_list_node
+end
+
+---@return table<integer, TSNode>
+local function get_call_nodes()
+    local parser = parsers.get_parser()
+    local tree = parser:parse()[1]
+    local query = vim.treesitter.query.parse("python", ts_query_string)
+
+    local start_line, end_line = get_start_and_end_line()
 
     --- @type table<integer, TSNode>
     local call_nodes = {}
     for id, node, _, _ in query:iter_captures(tree:root(), 0, start_line, end_line) do
         local capture_name = query.captures[id]
+
+        if capture_name == 'arg' then
+            print("Found argument node: " .. vim.treesitter.get_node_text(node, 0))
+        end
+
         if capture_name == "call" then
             call_nodes[#call_nodes + 1] = node
         end
@@ -71,51 +106,7 @@ local function get_call_nodes()
     return call_nodes
 end
 
---- Returns a table containing the positional and keyword arguments from the call node.
---- @param call_node TSNode
---- @return table
-local function get_call_values(call_node)
-    if call_node:type() ~= "call" then
-        error("Node is not a call node")
-    end
-
-    local argument_list_node = utils.find_first_node_of_type_bfs(call_node, "argument_list")
-
-    if argument_list_node == nil then
-        error("No argument list node found")
-    end
-
-    local discarded_node_types = {
-        [","] = true,
-        ["("] = true,
-        [")"] = true,
-    }
-
-    local result = {}
-
-    for child_node, _ in argument_list_node:iter_children() do
-        if discarded_node_types[child_node:type()] == true then
-            goto continue
-        end
-
-        local text = vim.treesitter.get_node_text(child_node, 0)
-
-        local entry = { name = nil, value = text, node = child_node }
-        if child_node:type() == "keyword_argument" then
-            local pos = string.find(text, "=")
-            entry.name = string.sub(text, 1, pos - 1)
-            entry.value = string.sub(text, pos + 1)
-        end
-        result[#result + 1] = entry
-
-        ::continue::
-    end
-
-    return result
-end
-
-
---- TODO
+--- TODO: Duplicate
 --- @param call_node TSNode
 --- @return table
 local function get_params_from_call_node(call_node)
@@ -137,15 +128,17 @@ local function get_params_from_call_node(call_node)
 end
 
 
+
+--- @class ArgumentInfo
+--- @field name string The name of the argument.
+--- @field type string|nil The type hint of the argument, if any.
+--- @field default string|nil The default value of the argument, if any.
+--- @field positional_only boolean Whether the argument is positional only.
+--- @field keyword_only boolean Whether the argument is keyword only.
+
 --- Retrieves a function's signature and reformats it into a table of tables.
 --- @param call_node TSNode: The node representing the function call.
---- @return table: A table containing the function's arguments with their details.
---- Each argument is represented as a table with the following fields:
---- - name (string): The name of the argument.
---- - type (string|nil): The type hint of the argument, if any.
---- - default (string|nil): The default value of the argument, if any.
---- - positional_only (boolean): Whether the argument is positional only.
---- - keyword_only (boolean): Whether the argument is keyword only.
+--- @return table<integer, ArgumentInfo>
 local function get_function_signature(call_node)
     if call_node:type() ~= "call" then
         error("Node is not a call node")
@@ -244,59 +237,75 @@ local function get_function_signature(call_node)
     return arg_data
 end
 
---- Returns the first LSP client that supports signature help.
----@return vim.lsp.Client?
-local function lsp_supports_signature_help()
-    -- Ensure the LSP client is attached
-    local clients = vim.lsp.get_clients()
+--- Returns a table containing the positional and keyword arguments from the call node.
+--- @param call_node TSNode
+--- @return table
+local function get_call_values(call_node)
+    if call_node:type() ~= "call" then
+        error("Node is not a call node")
+    end
 
-    local clients_with_signature_help = {}
-    for _, client in ipairs(clients) do
-        if client.server_capabilities.signatureHelpProvider then
-            clients_with_signature_help[#clients_with_signature_help + 1] = client
+    local argument_list_node = utils.find_first_node_of_type_bfs(call_node, "argument_list")
+
+    if argument_list_node == nil then
+        error("No argument list node found")
+    end
+
+    local discarded_node_types = {
+        [","] = true,
+        ["("] = true,
+        [")"] = true,
+    }
+
+    local result = {}
+
+    for child_node, _ in argument_list_node:iter_children() do
+        if discarded_node_types[child_node:type()] == true then
+            goto continue
         end
+
+        local text = vim.treesitter.get_node_text(child_node, 0)
+
+        local entry = { name = nil, value = text, node = child_node }
+        if child_node:type() == "keyword_argument" then
+            local pos = string.find(text, "=")
+            entry.name = string.sub(text, 1, pos - 1)
+            entry.value = string.sub(text, pos + 1)
+        end
+        result[#result + 1] = entry
+
+        ::continue::
     end
 
-    utils.maybe_print("Clients" .. #clients .. "Clients with signatureHelp" .. #clients_with_signature_help, debug)
-
-    if #clients_with_signature_help == 0 then
-        utils.maybe_print("No LSP client attached", debug)
-        return nil
-    end
-
-    utils.maybe_print("LSP server supports signatureHelp", debug)
-
-    return clients_with_signature_help[1]
+    return result
 end
 
---- Processes a function call node and aligns the call values with the function signature.
--- @param call_node The AST node representing the function call.
--- @return A table containing aligned call values with their corresponding signature details.
--- Each entry in the table includes:
---   - name: The name of the argument.
---   - value: The value passed to the argument.
---   - node: The AST node of the call value.
---   - index: The index of the argument in the function signature.
---   - positional_only: Boolean indicating if the argument is positional only.
---   - keyword_only: Boolean indicating if the argument is keyword only.
---   - default: The default value of the argument, if any.
+
+
+-- Do a more... list processing approach
+--- Processes a function call node to align its arguments with the function signature.
+---@param call_node TSNode The node representing the function call.
+---@return table<integer, ArgumentData>
 local function process_call_code(call_node)
     local signature = get_function_signature(call_node)
     local call_values = get_call_values(call_node)
 
+    --- @type table<integer, ArgumentData>
     local positional_call_values = vim.tbl_filter(function(x) return x["name"] == nil end, call_values)
+
+    --- @type table<integer, ArgumentData>
     local keyword_call_values = vim.tbl_filter(function(x) return x["name"] ~= nil end, call_values)
 
     local aligned = {}
     for j, call_value in ipairs(positional_call_values) do
+        local argument_data = signature[j]
         aligned[#aligned + 1] = {
-            name = signature[j].name,
+            name = argument_data.name,
             value = call_value["value"],
             node = call_value["node"],
-            index = signature[j].index,
-            positional_only = signature[j].positional_only,
-            keyword_only = signature[j].keyword_only,
-            default = signature[j].default,
+            positional_only = argument_data.positional_only,
+            keyword_only = argument_data.keyword_only,
+            default = argument_data.default,
         }
     end
 
@@ -341,6 +350,135 @@ local function process_call_code(call_node)
 end
 
 
+
+
+---@return table<{call: TSNode, args: table<integer, TSNode>}>
+local function get_calls_with_args()
+    local parser = parsers.get_parser()
+    local tree = parser:parse()[1]
+    local query = vim.treesitter.query.parse("python", ts_query_string)
+
+    local start_line, end_line = get_start_and_end_line()
+
+    ---@type table<{call: TSNode, args: table<integer, TSNode>, identifier: TSNode}>
+    local result = {}
+
+    -- get the captured call nodes and their argument_list node
+    for id, node, _, _ in query:iter_captures(tree:root(), 0, start_line, end_line) do
+        local capture_name = query.captures[id]
+
+        if capture_name == "call" then
+            local call_node = node
+            local argument_list_node = get_argument_list(call_node)
+            local identifier_node = utils.find_first_node_of_type_bfs(call_node, "identifier")
+
+            -- Collect all the argument nodes in the argument_list
+            local args = {}
+            for child_node, _ in argument_list_node:iter_children() do
+                if child_node:type() ~= "," and child_node:type() ~= "(" and child_node:type() ~= ")" then
+                    args[#args + 1] = child_node
+                end
+            end
+
+            result[#result + 1] = {
+                call = call_node,
+                args = args,
+                identifier = identifier_node,
+            }
+        end
+    end
+
+    -- Insert the signature info in the results
+    for _, call_and_args in ipairs(result) do
+        local signature = get_function_signature(call_and_args.call)
+        call_and_args["signature"] = signature
+        call_and_args["processed"] = process_call_code(call_and_args.call)
+    end
+
+    -- Create the list of edits to apply
+    -- Edits are basically just which nodes to which we should prepend the "{name}="
+
+    ---@type table<integer, Edit>
+    local edits = {}
+    for _, call_and_args in ipairs(result) do
+        for _, data in ipairs(call_and_args.processed) do
+            if data["positional_only"] == true then
+                goto continue
+            end
+
+            -- Check if the keyword is already present
+            -- TODO:
+            local node_text = vim.treesitter.get_node_text(data.node, 0)
+            if string.sub(node_text, 1, #data.name + 1) == data.name .. "=" then
+                goto continue
+            end
+
+            local row_start, col_start, _, _ = data.node:range()
+            local edit = {
+                row_start = row_start,
+                col_start = col_start,
+                -- row_start = row_start,
+                -- col_start = col_start,
+                text = { data.name .. "=" }, -- Only insert the keyword and equals sign
+            }
+            edits[#edits + 1] = edit
+
+            ::continue::
+        end
+    end
+
+    -- finally, sort the edits in reverse order by row_start and col_start
+    table.sort(edits, function(a, b)
+        if a.row_start == b.row_start then
+            return a.col_start > b.col_start
+        end
+        return a.row_start > b.row_start
+    end)
+
+    -- Apply the edits (they are already sorted in reverse order)
+    for _, edit in ipairs(edits) do
+        vim.api.nvim_buf_set_text(0, edit.row_start, edit.col_start, edit.row_start, edit.col_start, edit.text)
+    end
+
+    -- inpsect the results
+    for _, call_and_args in ipairs(result) do
+        print("Call node: " .. vim.treesitter.get_node_text(call_and_args.call, 0))
+        print("Identifier node: " .. vim.treesitter.get_node_text(call_and_args.identifier, 0))
+        for _, arg in ipairs(call_and_args.args) do
+            print("  Argument node: " .. vim.treesitter.get_node_text(arg, 0))
+        end
+        print("Signature: " .. vim.inspect(call_and_args.signature))
+        -- print the processed data
+        for _, data in ipairs(call_and_args.processed) do
+            print(string.format(
+                "  Processed: name=%s, value=%s, node=%s, positional_only=%s, keyword_only=%s, default=%s",
+                data.name,
+                data.value,
+                vim.treesitter.get_node_text(data.node, 0),
+                tostring(data.positional_only),
+                tostring(data.keyword_only),
+                tostring(data.default or "nil")
+            ))
+        end
+        print("Edits:")
+        for _, edit in ipairs(edits) do
+            print(string.format("  Edit: row_start=%d, col_start=%d, text=%s",
+                edit.row_start, edit.col_start, table.concat(edit.text, "")))
+        end
+    end
+
+    return result
+end
+
+---@class ArgumentData
+---@field name string
+---@field value string
+---@field node TSNode
+---@field positional_only boolean
+---@field keyword_only boolean
+---@field default string|nil
+
+
 -- NOTE: What to do when the LSP is not available?
 -- Here we could fallback to just searching the current file? How does `K` do it?
 -- Copilot:
@@ -363,13 +501,77 @@ end
 
 -- This function captures the output of the `:help` command for the given keyword and returns it as a string. You can then analyze the `help_text` variable as needed.
 
+
+-- Maybe what we need to do is collect the nodes whose text we need to update, and
+
+-- --- Inspects a table of TSNode
+-- ---@param nodes table<TSNode>
+-- local function inspect_nodes(nodes)
+--     for i, node in ipairs(nodes) do
+--         local text = vim.treesitter.get_node_text(node, 0)
+--         print("Node " .. i .. ": " .. text)
+--     end
+-- end
+
+
+---@class Edit
+---@field row_start integer @start row (0-index)
+---@field col_start integer @start col (bytes)
+---@field text string[]        @replacement lines; for pure insert, sr=er & sc=ec
+
+
 ---Expands the keyword arguments in the current line.
 M.expand_keywords = function()
-    if not lsp_supports_signature_help() then
-        return
+    if not utils.lsp_supports_signature_help() then
+        error("No LSP client supports signature help")
     end
 
-    local call_nodes = get_call_nodes()
+    -- local call_nodes = get_call_nodes()
+    local call_and_args = get_calls_with_args()
+
+    error("stop here")
+    for _, call_and_arg in ipairs(call_and_args) do
+        print("Call node: " .. vim.treesitter.get_node_text(call_and_arg.call, 0))
+        for _, arg in ipairs(call_and_arg.args) do
+            print("  Argument node: " .. vim.treesitter.get_node_text(arg, 0))
+        end
+    end
+
+    -- -- Collect all the children of argument_list nodes across all the call nodes and store them in a table indexed their position in the text (row, col), along with the associated call node.
+    -- local argument_nodes = {}
+    -- for _, call_node in ipairs(call_nodes) do
+    --     local argument_list_node = utils.find_first_node_of_type_bfs(call_node, "argument_list")
+    --     if argument_list_node == nil then
+    --         -- TODO: function can be empty inside an argument_list so maybe we don't want to raise
+    --         error("No argument list node found")
+    --     end
+    --     for child_node, _ in argument_list_node:iter_children() do
+    --         if child_node:type() ~= "," and child_node:type() ~= "(" and child_node:type() ~= ")" then
+    --             local row_start, col_start = child_node:start()
+    --             argument_nodes[#argument_nodes + 1] = {
+    --                 node = child_node,
+    --                 row_start = row_start,
+    --                 col_start = col_start,
+    --                 -- row_end = row_end,
+    --                 -- col_end = col_end,
+    --                 call_node = call_node,
+    --                 text = vim.treesitter.get_node_text(child_node, 0),
+    --             }
+    --         end
+    --     end
+    -- end
+    -- -- sort the table by row_start and col_start
+    -- table.sort(argument_nodes, function(a, b)
+    --     if a.row_start == b.row_start then
+    --         return a.col_start < b.col_start
+    --     end
+    --     return a.row_start < b.row_start
+    -- end)
+    -- print(vim.inspect(argument_nodes))
+
+    error("Stop here")
+
+    -- inspect_nodes(call_nodes)
 
     local aligned_data = {}
 
@@ -398,7 +600,7 @@ M.expand_keywords = function()
 end
 
 M.contract_keywords = function()
-    if not lsp_supports_signature_help() then
+    if not utils.lsp_supports_signature_help() then
         return
     end
 
