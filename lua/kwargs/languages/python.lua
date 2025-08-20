@@ -530,19 +530,23 @@ M.expand_keywords = function()
     local tree = parser:parse()[1]
     local query = vim.treesitter.query.parse("python", ts_query_string)
 
+    -- TODO: Doesn't work with visual selection - fix it.
     local start_line, end_line = get_start_and_end_line()
 
     ---@type table<{call: TSNode, args: table<integer, TSNode>, identifier: TSNode}>
     local result = {}
 
-    -- get the captured call nodes and their argument_list node
+    ---@type table<integer, Edit>
+    local edits = {}
+
     for id, node, _, _ in query:iter_captures(tree:root(), 0, start_line, end_line) do
         local capture_name = query.captures[id]
 
+        -- TODO: Do we even need this check since we are only matching call nodes anyways?
         if capture_name == "call" then
             local call_node = node
             local argument_list_node = get_argument_list(call_node)
-            local identifier_node = utils.find_first_node_of_type_bfs(call_node, "identifier")
+            -- local identifier_node = utils.find_first_node_of_type_bfs(call_node, "identifier")
 
             -- Collect all the argument nodes in the argument_list
             local arguments = {}
@@ -552,50 +556,72 @@ M.expand_keywords = function()
                 end
             end
 
-            local signature = get_function_signature(call_node)
+            -- local signature = get_function_signature(call_node)
 
-            result[#result + 1] = {
-                call_node = call_node,
-                arguments = arguments,
-                identifier = identifier_node,
-                signature = signature,
-                processed = process_call_code(call_node)
+            -- result[#result + 1] = {
+            --     call_node = call_node,
+            --     arguments = arguments,
+            --     identifier = identifier_node,
+            --     signature = signature,
+            --     processed = process_call_code(call_node)
+            -- }
 
-            }
+            for _, data in ipairs(process_call_code(call_node)) do
+                if data["positional_only"] == true then
+                    goto continue
+                end
+
+                -- Check if the keyword is already present
+                -- TODO:
+                local node_text = vim.treesitter.get_node_text(data.node, 0)
+                if string.sub(node_text, 1, #data.name + 1) == data.name .. "=" then
+                    goto continue
+                end
+
+                local row_start, col_start, _, _ = data.node:range()
+                local edit = {
+                    row_start = row_start,
+                    col_start = col_start,
+                    -- row_start = row_start,
+                    -- col_start = col_start,
+                    text = { data.name .. "=" }, -- Only insert the keyword and equals sign
+                }
+                edits[#edits + 1] = edit
+
+                ::continue::
+            end
         end
     end
 
     -- Create the list of edits to apply
     -- Edits are basically just which nodes to which we should prepend the "{name}="
 
-    ---@type table<integer, Edit>
-    local edits = {}
-    for _, call_and_args in ipairs(result) do
-        for _, data in ipairs(call_and_args.processed) do
-            if data["positional_only"] == true then
-                goto continue
-            end
-
-            -- Check if the keyword is already present
-            -- TODO:
-            local node_text = vim.treesitter.get_node_text(data.node, 0)
-            if string.sub(node_text, 1, #data.name + 1) == data.name .. "=" then
-                goto continue
-            end
-
-            local row_start, col_start, _, _ = data.node:range()
-            local edit = {
-                row_start = row_start,
-                col_start = col_start,
-                -- row_start = row_start,
-                -- col_start = col_start,
-                text = { data.name .. "=" }, -- Only insert the keyword and equals sign
-            }
-            edits[#edits + 1] = edit
-
-            ::continue::
-        end
-    end
+    -- for _, call_and_args in ipairs(result) do
+    --     for _, data in ipairs(call_and_args.processed) do
+    --         if data["positional_only"] == true then
+    --             goto continue
+    --         end
+    --
+    --         -- Check if the keyword is already present
+    --         -- TODO:
+    --         local node_text = vim.treesitter.get_node_text(data.node, 0)
+    --         if string.sub(node_text, 1, #data.name + 1) == data.name .. "=" then
+    --             goto continue
+    --         end
+    --
+    --         local row_start, col_start, _, _ = data.node:range()
+    --         local edit = {
+    --             row_start = row_start,
+    --             col_start = col_start,
+    --             -- row_start = row_start,
+    --             -- col_start = col_start,
+    --             text = { data.name .. "=" }, -- Only insert the keyword and equals sign
+    --         }
+    --         edits[#edits + 1] = edit
+    --
+    --         ::continue::
+    --     end
+    -- end
 
     -- finally, sort the edits in reverse order by row_start and col_start
     table.sort(edits, function(a, b)
