@@ -3,30 +3,6 @@ local parsers = require('nvim-treesitter.parsers')
 
 local M = {}
 
--- local ts_query_string = [[
---     (
---       (call
---         function: [
---           (identifier) @identifier
---           (attribute
---             object: (_)
---             attribute: (identifier)
---           )
---         ]
---         arguments: (argument_list
---           (_) @arg)*
---         ) @list
---       ) @call
--- ]]
--- local ts_query_string = [[
---     (call
---       function: (identifier)
---       arguments: (argument_list
---         (_))*
---      @call)
--- ]]
-
-
 local ts_query_string = [[
     (call (_)) @call
 ]]
@@ -58,14 +34,6 @@ local function get_start_and_end_line()
     end
     return start_line, end_line
 end
-
--- Its simpler to get the node we need then find the first set of children... I think
--- Then we can produce the list of edits we need to do
--- 1. Get all call nodes in the current selection
--- 2. For each call node, get the argument_list node and the identifier node
--- 3. Get the function signature for the identifier node (or wherever the cursor needs to be at)
--- 4. Align the arguments in the argument_list node with the function signature
--- 5. Produce a list of edits to apply to the buffer (applied in reverse order). The edits are not replacing text, simply inserting new text, with `keyword=` wherever appropriate.
 
 --- Return the argument list of a call node.
 ---@param call_node TSNode
@@ -333,142 +301,9 @@ local function process_call_code(call_node)
         }
     end
 
-    -- -- Optionally add the remaining signature arguments that were not passed
-    -- for i = #aligned + 1, #signature do
-    --     aligned[#aligned + 1] = {
-    --         name = signature[i].name,
-    --         value = signature[i].default,
-    --         node = nil,
-    --         index = signature[i].index,
-    --         positional_only = signature[i].positional_only,
-    --         keyword_only = signature[i].keyword_only,
-    --         default = signature[i].default,
-    --     }
-    -- end
-
     return aligned
 end
 
-
-
-
----@return table<{call: TSNode, args: table<integer, TSNode>}>
-local function get_calls_with_args()
-    local parser = parsers.get_parser()
-    local tree = parser:parse()[1]
-    local query = vim.treesitter.query.parse("python", ts_query_string)
-
-    local start_line, end_line = get_start_and_end_line()
-
-    ---@type table<{call: TSNode, args: table<integer, TSNode>, identifier: TSNode}>
-    local result = {}
-
-    -- get the captured call nodes and their argument_list node
-    for id, node, _, _ in query:iter_captures(tree:root(), 0, start_line, end_line) do
-        local capture_name = query.captures[id]
-
-        if capture_name == "call" then
-            local call_node = node
-            local argument_list_node = get_argument_list(call_node)
-            local identifier_node = utils.find_first_node_of_type_bfs(call_node, "identifier")
-
-            -- Collect all the argument nodes in the argument_list
-            local args = {}
-            for child_node, _ in argument_list_node:iter_children() do
-                if child_node:type() ~= "," and child_node:type() ~= "(" and child_node:type() ~= ")" then
-                    args[#args + 1] = child_node
-                end
-            end
-
-            result[#result + 1] = {
-                call = call_node,
-                args = args,
-                identifier = identifier_node,
-            }
-        end
-    end
-
-    -- Insert the signature info in the results
-    for _, call_and_args in ipairs(result) do
-        local signature = get_function_signature(call_and_args.call)
-        call_and_args["signature"] = signature
-        call_and_args["processed"] = process_call_code(call_and_args.call)
-    end
-
-    -- Create the list of edits to apply
-    -- Edits are basically just which nodes to which we should prepend the "{name}="
-
-    ---@type table<integer, Edit>
-    local edits = {}
-    for _, call_and_args in ipairs(result) do
-        for _, data in ipairs(call_and_args.processed) do
-            if data["positional_only"] == true then
-                goto continue
-            end
-
-            -- Check if the keyword is already present
-            -- TODO:
-            local node_text = vim.treesitter.get_node_text(data.node, 0)
-            if string.sub(node_text, 1, #data.name + 1) == data.name .. "=" then
-                goto continue
-            end
-
-            local row_start, col_start, _, _ = data.node:range()
-            local edit = {
-                row_start = row_start,
-                col_start = col_start,
-                -- row_start = row_start,
-                -- col_start = col_start,
-                text = { data.name .. "=" }, -- Only insert the keyword and equals sign
-            }
-            edits[#edits + 1] = edit
-
-            ::continue::
-        end
-    end
-
-    -- finally, sort the edits in reverse order by row_start and col_start
-    table.sort(edits, function(a, b)
-        if a.row_start == b.row_start then
-            return a.col_start > b.col_start
-        end
-        return a.row_start > b.row_start
-    end)
-
-    -- Apply the edits (they are already sorted in reverse order)
-    for _, edit in ipairs(edits) do
-        vim.api.nvim_buf_set_text(0, edit.row_start, edit.col_start, edit.row_start, edit.col_start, edit.text)
-    end
-
-    -- inpsect the results
-    for _, call_and_args in ipairs(result) do
-        print("Call node: " .. vim.treesitter.get_node_text(call_and_args.call, 0))
-        print("Identifier node: " .. vim.treesitter.get_node_text(call_and_args.identifier, 0))
-        for _, arg in ipairs(call_and_args.args) do
-            print("  Argument node: " .. vim.treesitter.get_node_text(arg, 0))
-        end
-        print("Signature: " .. vim.inspect(call_and_args.signature))
-        -- print the processed data
-        for _, data in ipairs(call_and_args.processed) do
-            print(string.format(
-                "  Processed: name=%s, value=%s, node=%s, positional_only=%s, keyword_only=%s, default=%s",
-                data.name,
-                data.value,
-                vim.treesitter.get_node_text(data.node, 0),
-                tostring(data.positional_only),
-                tostring(data.keyword_only),
-                tostring(data.default or "nil")
-            ))
-        end
-        print("Edits:")
-        for _, edit in ipairs(edits) do
-            print(string.format("  Edit: row_start=%d, col_start=%d, text=%s",
-                edit.row_start, edit.col_start, table.concat(edit.text, "")))
-        end
-    end
-
-    return result
-end
 
 ---@class ArgumentData
 ---@field name string
@@ -533,97 +368,53 @@ M.expand_keywords = function()
     -- TODO: Doesn't work with visual selection - fix it.
     local start_line, end_line = get_start_and_end_line()
 
-    ---@type table<{call: TSNode, args: table<integer, TSNode>, identifier: TSNode}>
-    local result = {}
-
     ---@type table<integer, Edit>
     local edits = {}
 
     for id, node, _, _ in query:iter_captures(tree:root(), 0, start_line, end_line) do
         local capture_name = query.captures[id]
 
-        -- TODO: Do we even need this check since we are only matching call nodes anyways?
-        if capture_name == "call" then
-            local call_node = node
-            local argument_list_node = get_argument_list(call_node)
-            -- local identifier_node = utils.find_first_node_of_type_bfs(call_node, "identifier")
+        if capture_name ~= "call" then
+            error("Capture is not a call node: " .. capture_name)
+        end
 
-            -- Collect all the argument nodes in the argument_list
-            local arguments = {}
-            for child_node, _ in argument_list_node:iter_children() do
-                if child_node:type() ~= "," and child_node:type() ~= "(" and child_node:type() ~= ")" then
-                    arguments[#arguments + 1] = child_node
-                end
+        local call_node = node
+        local argument_list_node = get_argument_list(call_node)
+
+        -- Collect all the argument nodes in the argument_list
+        local arguments = {}
+        for child_node, _ in argument_list_node:iter_children() do
+            if child_node:type() ~= "," and child_node:type() ~= "(" and child_node:type() ~= ")" then
+                arguments[#arguments + 1] = child_node
+            end
+        end
+
+        for _, data in ipairs(process_call_code(call_node)) do
+            -- Positional only arguments cannot be expanded
+            if data["positional_only"] == true then
+                goto continue
             end
 
-            -- local signature = get_function_signature(call_node)
-
-            -- result[#result + 1] = {
-            --     call_node = call_node,
-            --     arguments = arguments,
-            --     identifier = identifier_node,
-            --     signature = signature,
-            --     processed = process_call_code(call_node)
-            -- }
-
-            for _, data in ipairs(process_call_code(call_node)) do
-                if data["positional_only"] == true then
-                    goto continue
-                end
-
-                -- Check if the keyword is already present
-                -- TODO:
-                local node_text = vim.treesitter.get_node_text(data.node, 0)
-                if string.sub(node_text, 1, #data.name + 1) == data.name .. "=" then
-                    goto continue
-                end
-
-                local row_start, col_start, _, _ = data.node:range()
-                local edit = {
-                    row_start = row_start,
-                    col_start = col_start,
-                    -- row_start = row_start,
-                    -- col_start = col_start,
-                    text = { data.name .. "=" }, -- Only insert the keyword and equals sign
-                }
-                edits[#edits + 1] = edit
-
-                ::continue::
+            -- Check if the keyword is already present
+            local node_text = vim.treesitter.get_node_text(data.node, 0)
+            if string.sub(node_text, 1, #data.name + 1) == data.name .. "=" then
+                goto continue
             end
+
+            -- Set up the edit for this argument
+            local row_start, col_start, _, _ = data.node:range()
+            local edit = {
+                row_start = row_start,
+                col_start = col_start,
+                text = { data.name .. "=" }, -- Only insert the keyword and equals sign
+            }
+            edits[#edits + 1] = edit
+
+            ::continue::
         end
     end
 
-    -- Create the list of edits to apply
-    -- Edits are basically just which nodes to which we should prepend the "{name}="
-
-    -- for _, call_and_args in ipairs(result) do
-    --     for _, data in ipairs(call_and_args.processed) do
-    --         if data["positional_only"] == true then
-    --             goto continue
-    --         end
-    --
-    --         -- Check if the keyword is already present
-    --         -- TODO:
-    --         local node_text = vim.treesitter.get_node_text(data.node, 0)
-    --         if string.sub(node_text, 1, #data.name + 1) == data.name .. "=" then
-    --             goto continue
-    --         end
-    --
-    --         local row_start, col_start, _, _ = data.node:range()
-    --         local edit = {
-    --             row_start = row_start,
-    --             col_start = col_start,
-    --             -- row_start = row_start,
-    --             -- col_start = col_start,
-    --             text = { data.name .. "=" }, -- Only insert the keyword and equals sign
-    --         }
-    --         edits[#edits + 1] = edit
-    --
-    --         ::continue::
-    --     end
-    -- end
-
-    -- finally, sort the edits in reverse order by row_start and col_start
+    -- Finally, sort the edits in reverse order by row_start and col_start
     table.sort(edits, function(a, b)
         if a.row_start == b.row_start then
             return a.col_start > b.col_start
@@ -635,102 +426,6 @@ M.expand_keywords = function()
     for _, edit in ipairs(edits) do
         vim.api.nvim_buf_set_text(0, edit.row_start, edit.col_start, edit.row_start, edit.col_start, edit.text)
     end
-
-    -- -- inpsect the results
-    -- for _, call_and_args in ipairs(result) do
-    --     print("Call node: " .. vim.treesitter.get_node_text(call_and_args.call, 0))
-    --     print("Identifier node: " .. vim.treesitter.get_node_text(call_and_args.identifier, 0))
-    --     for _, arg in ipairs(call_and_args.args) do
-    --         print("  Argument node: " .. vim.treesitter.get_node_text(arg, 0))
-    --     end
-    --     print("Signature: " .. vim.inspect(call_and_args.signature))
-    --     -- print the processed data
-    --     for _, data in ipairs(call_and_args.processed) do
-    --         print(string.format(
-    --             "  Processed: name=%s, value=%s, node=%s, positional_only=%s, keyword_only=%s, default=%s",
-    --             data.name,
-    --             data.value,
-    --             vim.treesitter.get_node_text(data.node, 0),
-    --             tostring(data.positional_only),
-    --             tostring(data.keyword_only),
-    --             tostring(data.default or "nil")
-    --         ))
-    --     end
-    --     print("Edits:")
-    --     for _, edit in ipairs(edits) do
-    --         print(string.format("  Edit: row_start=%d, col_start=%d, text=%s",
-    --             edit.row_start, edit.col_start, table.concat(edit.text, "")))
-    --     end
-    -- end
-
-    -- error("stop here")
-    -- for _, call_and_arg in ipairs(call_and_args) do
-    --     print("Call node: " .. vim.treesitter.get_node_text(call_and_arg.call, 0))
-    --     for _, arg in ipairs(call_and_arg.args) do
-    --         print("  Argument node: " .. vim.treesitter.get_node_text(arg, 0))
-    --     end
-    -- end
-
-    -- -- Collect all the children of argument_list nodes across all the call nodes and store them in a table indexed their position in the text (row, col), along with the associated call node.
-    -- local argument_nodes = {}
-    -- for _, call_node in ipairs(call_nodes) do
-    --     local argument_list_node = utils.find_first_node_of_type_bfs(call_node, "argument_list")
-    --     if argument_list_node == nil then
-    --         -- TODO: function can be empty inside an argument_list so maybe we don't want to raise
-    --         error("No argument list node found")
-    --     end
-    --     for child_node, _ in argument_list_node:iter_children() do
-    --         if child_node:type() ~= "," and child_node:type() ~= "(" and child_node:type() ~= ")" then
-    --             local row_start, col_start = child_node:start()
-    --             argument_nodes[#argument_nodes + 1] = {
-    --                 node = child_node,
-    --                 row_start = row_start,
-    --                 col_start = col_start,
-    --                 -- row_end = row_end,
-    --                 -- col_end = col_end,
-    --                 call_node = call_node,
-    --                 text = vim.treesitter.get_node_text(child_node, 0),
-    --             }
-    --         end
-    --     end
-    -- end
-    -- -- sort the table by row_start and col_start
-    -- table.sort(argument_nodes, function(a, b)
-    --     if a.row_start == b.row_start then
-    --         return a.col_start < b.col_start
-    --     end
-    --     return a.row_start < b.row_start
-    -- end)
-    -- print(vim.inspect(argument_nodes))
-
-    -- error("Stop here")
-
-    -- inspect_nodes(call_nodes)
-
-    -- local aligned_data = {}
-
-    -- for i = #call_nodes, 1, -1 do
-    --     local call_node = call_nodes[i]
-    --     local aligned = process_call_code(call_node)
-    --
-    --     -- here we can iterate backwords over the aligned arguments and insert them into the buffer
-    --     for j = #aligned, 1, -1 do
-    --         local data = aligned[j]
-    --         if data["positional_only"] == true then
-    --             -- Nothing to do here
-    --             goto continue
-    --         end
-    --
-    --         ---@type TSNode
-    --         local node = data["node"]
-    --         local row_start, col_start, row_end, col_end = node:range()
-    --         vim.api.nvim_buf_set_text(0, row_start, col_start, row_end, col_end, { data["name"] .. "=" .. data["value"] })
-    --
-    --         ::continue::
-    --     end
-    --
-    --     aligned_data[#aligned_data + 1] = aligned
-    -- end
 end
 
 M.contract_keywords = function()
@@ -769,34 +464,27 @@ end
 --     if not lsp_supports_signature_help() then
 --         return
 --     end
-
 --     local call_nodes = get_call_nodes()
-
 --     for i = #call_nodes, 1, -1 do
 --         local call_node = call_nodes[i]
 --         local aligned = process_call_code(call_node)
-
 --         -- here we can iterate backwords over the aligned arguments and insert them into the buffer
 --         for j = #aligned, 1, -1 do
 --             local data = aligned[j]
 --             local default = data["default"]
-
 --             if default == nil then
 --                 goto continue
 --             end
-
 --             ---@type TSNode
 --             local node = data["node"]
 --             local row_start, col_start, row_end, col_end = node:range()
 --             print("default: " .. default)
-
 --             -- Actually if its a keyword only argument we should insert default default as a kwarg
 --             local replacement = default
 --             if data["keyword_only"] == true then
 --                 replacement = data["name"] .. "=" .. replacement
 --             end
 --             vim.api.nvim_buf_set_text(0, row_start, col_start, row_end, col_end, { replacement })
-
 --             ::continue::
 --         end
 --     end
