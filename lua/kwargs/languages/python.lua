@@ -8,6 +8,8 @@ local ts_query_string = [[
 ]]
 
 
+local python_variable_name_pattern = "[%a_][%w_]*"
+
 --- Find the start and end line of the current selection or line.
 ---@return integer, integer
 local function get_start_and_end_line()
@@ -27,12 +29,93 @@ local function get_start_and_end_line()
         -- -- How to send Esc?
         -- vim.cmd(":yank k")
     elseif mode == 'n' then
+        -- start_line = vim.fn.line('.') - 1
+        -- end_line = start_line + 1
         start_line = vim.fn.line('.') - 1
-        end_line = start_line + 1
+        end_line = vim.fn.line('.')
     else
         error("Invalid mode")
     end
     return start_line, end_line
+end
+
+-- Traverse treesitter nodes UP until we find the top-most call node
+-- starting from the current cursor position and return it.
+local function get_top_most_call_node()
+    local parser = parsers.get_parser()
+    local tree = parser:parse()[1]
+    local root = tree:root()
+
+    local cursor_row, cursor_col = unpack(vim.api.nvim_win_get_cursor(0))
+    cursor_row = cursor_row - 1 -- Convert to 0-indexed
+
+    local node = root:named_descendant_for_range(cursor_row, cursor_col, cursor_row, cursor_col)
+
+    while node do
+        if node:type() == "call" then
+            return node
+        end
+        node = node:parent()
+    end
+
+    return nil
+end
+
+-- From a given call node, traverse down to find all call nodes under
+-- the given node. Return them in a table<integer, TSNode>.
+local function get_all_call_nodes(node)
+    if node:type() ~= "call" then
+        error("Node is not a call node")
+    end
+
+    local call_nodes = {}
+
+    local function traverse(n)
+        if n:type() == "call" then
+            call_nodes[#call_nodes + 1] = n
+        end
+        for child, _ in n:iter_children() do
+            traverse(child)
+        end
+    end
+
+    traverse(node)
+    return call_nodes
+end
+
+---@return table<integer, TSNode>
+local function get_call_nodes()
+    local parser = parsers.get_parser()
+    local tree = parser:parse()[1]
+    local query = vim.treesitter.query.parse("python", ts_query_string)
+
+    local start_line, end_line = get_start_and_end_line()
+
+    local top_most_call_node = get_top_most_call_node()
+    if top_most_call_node == nil then
+        error("No call node found at cursor")
+    end
+    local call_nodes = {}
+    for _, node in ipairs(get_all_call_nodes(top_most_call_node)) do
+        call_nodes[#call_nodes + 1] = node
+    end
+    return call_nodes
+
+    -- --- @type table<integer, TSNode>
+    -- local call_nodes = {}
+    -- for id, node, _, _ in query:iter_captures(tree:root(), 0, start_line, end_line) do
+    --     local capture_name = query.captures[id]
+    --
+    --     if capture_name == 'arg' then
+    --         print("Found argument node: " .. vim.treesitter.get_node_text(node, 0))
+    --     end
+    --
+    --     if capture_name == "call" then
+    --         call_nodes[#call_nodes + 1] = node
+    --     end
+    -- end
+    --
+    -- return call_nodes
 end
 
 --- Return the argument list of a call node.
@@ -49,35 +132,9 @@ local function get_argument_list(call_node)
     return argument_list_node
 end
 
----@return table<integer, TSNode>
-local function get_call_nodes()
-    local parser = parsers.get_parser()
-    local tree = parser:parse()[1]
-    local query = vim.treesitter.query.parse("python", ts_query_string)
-
-    local start_line, end_line = get_start_and_end_line()
-
-    --- @type table<integer, TSNode>
-    local call_nodes = {}
-    for id, node, _, _ in query:iter_captures(tree:root(), 0, start_line, end_line) do
-        local capture_name = query.captures[id]
-
-        if capture_name == 'arg' then
-            print("Found argument node: " .. vim.treesitter.get_node_text(node, 0))
-        end
-
-        if capture_name == "call" then
-            call_nodes[#call_nodes + 1] = node
-        end
-    end
-
-    return call_nodes
-end
-
---- TODO: Duplicate
 --- @param call_node TSNode
 --- @return table
-local function get_params_from_call_node(call_node)
+local function make_lsp_params(call_node)
     local argument_list_node = utils.find_first_node_of_type_bfs(call_node, "argument_list")
 
     if argument_list_node == nil then
@@ -112,7 +169,7 @@ local function get_function_signature(call_node)
         error("Node is not a call node")
     end
 
-    local params = get_params_from_call_node(call_node)
+    local params = make_lsp_params(call_node)
 
     -- WARNING: Not sure I understand this...
     params.position.character = params.position.character + 1
@@ -248,9 +305,14 @@ local function get_call_values(call_node)
     return result
 end
 
+---@class ArgumentData
+---@field name string
+---@field value string
+---@field node TSNode
+---@field positional_only boolean
+---@field keyword_only boolean
+---@field default string|nil
 
-
--- Do a more... list processing approach
 --- Processes a function call node to align its arguments with the function signature.
 ---@param call_node TSNode The node representing the function call.
 ---@return table<integer, ArgumentData>
@@ -287,9 +349,11 @@ local function process_call_code(call_node)
                 break
             end
         end
+
         if index == nil then
             error("Argument not found in signature")
         end
+
         aligned[#aligned + 1] = {
             name = call_value["name"],
             value = call_value["value"],
@@ -303,15 +367,6 @@ local function process_call_code(call_node)
 
     return aligned
 end
-
-
----@class ArgumentData
----@field name string
----@field value string
----@field node TSNode
----@field positional_only boolean
----@field keyword_only boolean
----@field default string|nil
 
 
 -- NOTE: What to do when the LSP is not available?
@@ -333,11 +388,8 @@ end
 --     print(help_text)
 -- end
 -- ```
-
 -- This function captures the output of the `:help` command for the given keyword and returns it as a string. You can then analyze the `help_text` variable as needed.
 
-
--- Maybe what we need to do is collect the nodes whose text we need to update, and
 
 -- --- Inspects a table of TSNode
 -- ---@param nodes table<TSNode>
@@ -428,36 +480,117 @@ M.expand_keywords = function()
     end
 end
 
+
 M.contract_keywords = function()
     if not utils.lsp_supports_signature_help() then
         return
     end
 
     local call_nodes = get_call_nodes()
+    ---@type table<integer, Edit>
+    local edits = {}
 
-    for i = #call_nodes, 1, -1 do
+    for i = 1, #call_nodes do
         local call_node = call_nodes[i]
         local aligned = process_call_code(call_node)
 
-        -- here we can iterate backwords over the aligned arguments and insert them into the buffer
-        for j = #aligned, 1, -1 do
+        for j = 1, #aligned do
             local data = aligned[j]
+
+            -- Skip contraction of the keyword only arguments
             if data["keyword_only"] == true then
-                -- Nothing to do here
                 goto continue
             end
+
+            -- Positional only arguments cannot/should not be contracted
+            if data["positional_only"] == true then
+                goto continue
+            end
+
+            -- If the current argument does not have a keyword, we cannot contract it
+            if data["name"] == nil then
+                goto continue
+            end
+
+            -- Get the node's text
+            local node_text = vim.treesitter.get_node_text(data.node, 0)
+
+            -- Check if the value starts with a python variable name pattern
+            -- plus an equals sign
+            -- print("Checking value: " .. data["value"])
+            if not string.match(node_text, python_variable_name_pattern .. "%s*=") then
+                goto continue
+            end
+
+            -- TODO: Copilot fucked up here. Re-do
 
             ---@type TSNode
             local node = data["node"]
             local row_start, col_start, row_end, col_end = node:range()
-            local replacement = data["value"]
-            local lines = vim.split(replacement, "\n", { trimempty = true })
-            vim.api.nvim_buf_set_text(0, row_start, col_start, row_end, col_end, lines)
+            -- print("Contracting argument: " .. data["name"] .. " at " .. row_start .. ":" .. col_start)
+            -- TODO: Multiline edits don't work here.
+            edits[#edits + 1] = {
+                row_start = row_start,
+                col_start = col_start,
+                row_end = row_start,
+                col_end = col_start + #data["name"] + 1, -- +1 for the equals sign
+                text = { "" },                           -- Delete the keyword and equals sign
+            }
 
             ::continue::
         end
     end
+
+    -- Sort edits in reverse order
+    table.sort(edits, function(a, b)
+        if a.row_start == b.row_start then
+            return a.col_start > b.col_start
+        end
+        return a.row_start > b.row_start
+    end)
+
+    -- Apply edits
+    for _, edit in ipairs(edits) do
+        local line = vim.api.nvim_buf_get_lines(0, edit.row_end, edit.row_end + 1, false)[1] or ""
+        local line_length = #line
+        local end_col = math.min(edit.col_end, line_length)
+        -- print("Applying edit: " .. vim.inspect(edit))
+        vim.api.nvim_buf_set_text(0, edit.row_start, edit.col_start, edit.row_end, end_col, edit.text)
+        -- vim.api.nvim_buf_set_text(0, edit.row_start, edit.col_start, edit.row_end, edit.col_end, edit.text)
+    end
 end
+
+
+-- M.contract_keywords = function()
+--     if not utils.lsp_supports_signature_help() then
+--         return
+--     end
+--
+--     local call_nodes = get_call_nodes()
+--
+--     for i = #call_nodes, 1, -1 do
+--         local call_node = call_nodes[i]
+--         local aligned = process_call_code(call_node)
+--
+--         -- here we can iterate backwords over the aligned arguments and insert them into the buffer
+--         for j = #aligned, 1, -1 do
+--             local data = aligned[j]
+--             if data["keyword_only"] == true then
+--                 -- Nothing to do here
+--                 goto continue
+--             end
+--
+--             ---@type TSNode
+--             local node = data["node"]
+--             local row_start, col_start, row_end, col_end = node:range()
+--             local replacement = data["value"]
+--             local lines = vim.split(replacement, "\n", { trimempty = true })
+--             vim.api.nvim_buf_set_text(0, row_start, col_start, row_end, col_end, lines)
+--
+--             ::continue::
+--         end
+--     end
+-- end
 
 -- -- Actually this is harder because we need to insert new text, not just modify existing nodes!
 -- M.insert_defaults = function()
@@ -491,3 +624,10 @@ end
 -- end
 
 return M
+
+-- TODO: Fails with kwargs: try:
+-- return pydantic.create_model(
+--     name,
+--     __base__=Extra,
+--     **fields,
+-- )
