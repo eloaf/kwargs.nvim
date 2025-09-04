@@ -1,10 +1,7 @@
+
 # kwargs.nvim
 
-Neovim plugin for expanding and contracting keyword arguments in Python function calls.
-
-Written in Lua, using [Tree-Sitter](https://tree-sitter.github.io/tree-sitter/) and [Neovim LSP](https://neovim.io/).
-
-Inspired by the ergonomics of keyword argument manipulation in IDEs and Python editors.
+Expands and contracts keyword arguments in function calls. Currently supports Python. Designed to be extended for Ruby, Kotlin, Swift, Julia, and similar languages.
 
 <!-- panvimdoc-ignore-start -->
 
@@ -25,18 +22,14 @@ Inspired by the ergonomics of keyword argument manipulation in IDEs and Python e
 
 ## Features
 
-- **Expand positional arguments to keywords**: Quickly convert positional arguments in Python calls to explicit keyword arguments using LSP function signatures.
-- **Contract keyword arguments to positional**: Remove explicit keywords from arguments where possible, reverting to positional style.
-- **Works anywhere in the call**: No need to move the cursor to a specific argument.
-- **Visual and normal mode support**: Operate on the current line or selection.
-- **Smart detection**: Uses Treesitter and LSP for robust parsing and signature detection.
-- **Extensible**: Language support can be extended.
+- Expand positional arguments (where possible) to keywords using LSP function signatures.
+- Contract keyword arguments to positional where possible.
+- Expands or contracts the arguments of all the functions under the nearest function call above the cursor.
 
 ## Requirements
 
-- [Neovim 0.9+](https://github.com/neovim/neovim/releases)
-- [nvim-treesitter](https://github.com/nvim-treesitter/nvim-treesitter) (with Python parser installed)
-- [Neovim LSP](https://neovim.io/) (with a Python language server, e.g. [pyright](https://github.com/microsoft/pyright))
+- nvim-treesitter (with appropriate language parser)
+- Neovim LSP (with a language server, e.g. pyright)
 
 ## Installation
 
@@ -44,7 +37,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 
 ```lua
 {
-  'yourusername/kwargs.nvim',
+  'eloaf/kwargs.nvim',
   keys = { '<leader>ke', '<leader>kc' },
   dependencies = { 'nvim-treesitter/nvim-treesitter' },
   config = function()
@@ -53,26 +46,15 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 }
 ```
 
-With [packer.nvim](https://github.com/wbthomason/packer.nvim):
-
-```lua
-use({
-  'yourusername/kwargs.nvim',
-  requires = { 'nvim-treesitter/nvim-treesitter' },
-  config = function()
-    require('kwargs').setup()
-  end,
-})
-```
 
 ## Settings
 
-No configuration is required for basic usage. The plugin sets up default key mappings:
+Default key mappings:
 
 - `<leader>ke`: Expand positional arguments to keywords
 - `<leader>kc`: Contract keyword arguments to positional
 
-You can customize key mappings by overriding the `setup()` function.
+Key mappings can be customized in the `setup()` function.
 
 ## Commands
 
@@ -81,13 +63,13 @@ You can customize key mappings by overriding the `setup()` function.
 
 ## How plugin works
 
-- Uses Treesitter to find function call nodes at the cursor or in the selection.
-- Uses LSP signature help to get argument names and types.
-- Edits the buffer to insert or remove keywords as appropriate.
-- Supports both normal and visual mode operations.
+- Uses Treesitter to find function call nodes.
+- Uses LSP signature help for argument names and types.
+- Edits the buffer to insert or remove keywords.
+- Supports normal and visual mode.
 
 ## Configuration
 
 ### Languages
 
-Currently supports Python. To add support for other languages, extend `lua/kwargs/languages/`.
+Currently supports Python. To add other languages, extend `lua/kwargs/languages/`.
