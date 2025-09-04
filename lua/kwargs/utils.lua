@@ -1,9 +1,10 @@
 local M = {}
 
+local debug = false
+
 ---Prints the message if debug is true
 ---@param x string | table
----@param debug boolean
-M.maybe_print = function(x, debug)
+local function maybe_print(x)
     if debug then
         if type(x) == "table" then
             x = vim.inspect(x)
@@ -11,12 +12,13 @@ M.maybe_print = function(x, debug)
         print(x)
     end
 end
+M.maybe_print = maybe_print
 
 ---BFS on the tree under `node` to find the first node of type `target_type`
 ---@param node TSNode
 ---@param target_type string
 ---@return TSNode
-M.find_first_node_of_type_bfs = function(node, target_type)
+local function find_first_node_of_type_bfs(node, target_type)
     local queue = { node }
 
     while #queue > 0 do
@@ -33,5 +35,32 @@ M.find_first_node_of_type_bfs = function(node, target_type)
 
     error("Node not found")
 end
+M.find_first_node_of_type_bfs = find_first_node_of_type_bfs
+
+--- Returns the first LSP client that supports signature help.
+---@return vim.lsp.Client?
+local function lsp_supports_signature_help()
+    -- Ensure the LSP client is attached
+    local clients = vim.lsp.get_clients()
+
+    local clients_with_signature_help = {}
+    for _, client in ipairs(clients) do
+        if client.server_capabilities.signatureHelpProvider then
+            clients_with_signature_help[#clients_with_signature_help + 1] = client
+        end
+    end
+
+    maybe_print("Clients" .. #clients .. "Clients with signatureHelp" .. #clients_with_signature_help)
+
+    if #clients_with_signature_help == 0 then
+        maybe_print("No LSP client attached")
+        return nil
+    end
+
+    maybe_print("LSP server supports signatureHelp")
+
+    return clients_with_signature_help[1]
+end
+M.lsp_supports_signature_help = lsp_supports_signature_help
 
 return M
