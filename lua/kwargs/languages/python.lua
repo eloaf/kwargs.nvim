@@ -404,6 +404,8 @@ end
 ---@class Edit
 ---@field row_start integer @start row (0-index)
 ---@field col_start integer @start col (bytes)
+---@field row_end integer   @end row (0-index); for pure insert, sr=er
+---@field col_end integer   @end col (bytes); for pure insert, sc=ec
 ---@field text string[]        @replacement lines; for pure insert, sr=er & sc=ec
 
 
@@ -413,24 +415,27 @@ M.expand_keywords = function()
         error("No LSP client supports signature help")
     end
 
-    local parser = parsers.get_parser()
-    local tree = parser:parse()[1]
-    local query = vim.treesitter.query.parse("python", ts_query_string)
+    -- local parser = parsers.get_parser()
+    -- local tree = parser:parse()[1]
+    -- local query = vim.treesitter.query.parse("python", ts_query_string)
+    --
+    -- -- TODO: Doesn't work with visual selection - fix it.
+    -- local start_line, end_line = get_start_and_end_line()
 
-    -- TODO: Doesn't work with visual selection - fix it.
-    local start_line, end_line = get_start_and_end_line()
+    local call_nodes = get_call_nodes()
 
     ---@type table<integer, Edit>
     local edits = {}
 
-    for id, node, _, _ in query:iter_captures(tree:root(), 0, start_line, end_line) do
-        local capture_name = query.captures[id]
+    -- for id, node, _, _ in query:iter_captures(tree:root(), 0, start_line, end_line) do
+    --     local capture_name = query.captures[id]
 
-        if capture_name ~= "call" then
-            error("Capture is not a call node: " .. capture_name)
-        end
+    for i = 1, #call_nodes do
+        -- if capture_name ~= "call" then
+        --     error("Capture is not a call node: " .. capture_name)
+        -- end
 
-        local call_node = node
+        local call_node = call_nodes[i]
         local argument_list_node = get_argument_list(call_node)
 
         -- Collect all the argument nodes in the argument_list
@@ -526,7 +531,7 @@ M.contract_keywords = function()
 
             ---@type TSNode
             local node = data["node"]
-            local row_start, col_start, row_end, col_end = node:range()
+            local row_start, col_start, _, _ = node:range()
             -- print("Contracting argument: " .. data["name"] .. " at " .. row_start .. ":" .. col_start)
             -- TODO: Multiline edits don't work here.
             edits[#edits + 1] = {
@@ -560,37 +565,6 @@ M.contract_keywords = function()
     end
 end
 
-
--- M.contract_keywords = function()
---     if not utils.lsp_supports_signature_help() then
---         return
---     end
---
---     local call_nodes = get_call_nodes()
---
---     for i = #call_nodes, 1, -1 do
---         local call_node = call_nodes[i]
---         local aligned = process_call_code(call_node)
---
---         -- here we can iterate backwords over the aligned arguments and insert them into the buffer
---         for j = #aligned, 1, -1 do
---             local data = aligned[j]
---             if data["keyword_only"] == true then
---                 -- Nothing to do here
---                 goto continue
---             end
---
---             ---@type TSNode
---             local node = data["node"]
---             local row_start, col_start, row_end, col_end = node:range()
---             local replacement = data["value"]
---             local lines = vim.split(replacement, "\n", { trimempty = true })
---             vim.api.nvim_buf_set_text(0, row_start, col_start, row_end, col_end, lines)
---
---             ::continue::
---         end
---     end
--- end
 
 -- -- Actually this is harder because we need to insert new text, not just modify existing nodes!
 -- M.insert_defaults = function()
