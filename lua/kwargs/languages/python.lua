@@ -42,7 +42,10 @@ end
 -- Traverse treesitter nodes UP until we find the top-most call node
 -- starting from the current cursor position and return it.
 local function get_top_most_call_node()
-    local parser = parsers.get_parser()
+    local parser = vim.treesitter.get_parser(0, "python")
+    if parser == nil then
+        error("No parser found for current buffer")
+    end
     local tree = parser:parse()[1]
     local root = tree:root()
 
